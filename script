@@ -1,0 +1,1 @@
+powershell -ExecutionPolicy Bypass -File packaging\windows\build_installer.ps1

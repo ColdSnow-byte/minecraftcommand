@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128"
+     role="img" aria-label="Minecraft 26.3 指令台图标">
+  <title>Minecraft 26.3 指令台</title>
+  <desc>命令方块 + 指令输入光标 + 补全建议面板，液态玻璃风格</desc>
+
+  <defs>
+    <!-- 深色玻璃底 -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#171C24"/>
+      <stop offset="0.55" stop-color="#0C0E13"/>
+      <stop offset="1" stop-color="#07080B"/>
+    </linearGradient>
+
+    <!-- 玻璃面板（液态玻璃质感） -->
+    <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.10"/>
+    </linearGradient>
+
+    <!-- 斜向高光 / 折射 -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.30"/>
+      <stop offset="0.38" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- 命令方块主色（Minecraft 命令方块橙棕） -->
+    <linearGradient id="block" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#E2A868"/>
+      <stop offset="1" stop-color="#B77B36"/>
+    </linearGradient>
+
+    <!-- 强调色光晕（主题绿 #7EF0B2，呼应 Rust 引擎与成功提示） -->
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7EF0B2" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#7EF0B2" stop-opacity="0"/>
+    </radialGradient>
+
+    <clipPath id="blockClip">
+      <rect x="33" y="23" width="62" height="62" rx="4"/>
+    </clipPath>
+  </defs>
+
+  <!-- 背景 -->
+  <rect x="0" y="0" width="128" height="128" rx="28" fill="url(#bg)"/>
+
+  <!-- 主题绿光晕 -->
+  <circle cx="64" cy="54" r="42" fill="url(#glow)"/>
+
+  <!-- 液态玻璃内面板 -->
+  <rect x="7" y="7" width="114" height="114" rx="23" fill="url(#glass)"/>
+  <rect x="7.5" y="7.5" width="113" height="113" rx="22.5"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="1"/>
+
+  <!-- Minecraft 命令方块 -->
+  <g>
+    <!-- 方块底色 -->
+    <rect x="33" y="23" width="62" height="62" rx="4" fill="url(#block)"/>
+
+    <!-- 像素纹理（命令方块特有的明暗格） -->
+    <g clip-path="url(#blockClip)" opacity="0.5">
+      <rect x="33" y="23" width="15" height="15" fill="#8E5C25"/>
+      <rect x="64" y="23" width="15" height="15" fill="#F0BC7E"/>
+      <rect x="80" y="54" width="15" height="15" fill="#8E5C25"/>
+      <rect x="33" y="62" width="15" height="15" fill="#F0BC7E"/>
+      <rect x="49" y="46" width="15" height="15" fill="#9C6729"/>
+      <rect x="49" y="70" width="15" height="15" fill="#9C6729"/>
+      <rect x="80" y="39" width="15" height="15" fill="#F0BC7E"/>
+      <rect x="64" y="70" width="15" height="15" fill="#8E5C25"/>
+    </g>
+
+    <!-- 像素描边 + 顶部高光 / 底部阴影 -->
+    <rect x="33" y="23" width="62" height="62" rx="4"
+          fill="none" stroke="#5B3814" stroke-width="3"/>
+    <rect x="35" y="25" width="58" height="4" fill="#FFFFFF" opacity="0.22"/>
+    <rect x="35" y="80" width="58" height="4" fill="#000000" opacity="0.25"/>
+
+    <!-- 指令斜杠 “/”（描边加深以保证对比度） -->
+    <path d="M55 67 L73 43" stroke="#3A230A" stroke-opacity="0.55"
+          stroke-width="11" stroke-linecap="round" fill="none"/>
+    <path d="M55 67 L73 43" stroke="#FFFFFF"
+          stroke-width="6" stroke-linecap="round" fill="none"/>
+
+    <!-- 输入光标（方块光标，主题绿） -->
+    <rect x="77" y="45" width="6" height="21" rx="1.5" fill="#3A230A" opacity="0.45"/>
+    <rect x="77.5" y="45.5" width="5" height="20" rx="1.5" fill="#7EF0B2"/>
+  </g>
+
+  <!-- 补全建议面板（自动补齐 / 语法提示） -->
+  <g>
+    <rect x="24" y="86" width="80" height="29" rx="9"
+          fill="#FFFFFF" fill-opacity="0.10"/>
+    <rect x="24.5" y="86.5" width="79" height="28" rx="8.5"
+          fill="none" stroke="#FFFFFF" stroke-opacity="0.24" stroke-width="1"/>
+
+    <!-- 选中的补全项（绿色高亮） -->
+    <rect x="32" y="93" width="46" height="6" rx="3" fill="#7EF0B2" opacity="0.9"/>
+    <!-- 次要补全项 -->
+    <rect x="32" y="104" width="28" height="5" rx="2.5" fill="#FFFFFF" opacity="0.38"/>
+    <!-- 语法错误提示（红色片段） -->
+    <rect x="64" y="103" width="14" height="6" rx="3" fill="#FF8A80" opacity="0.92"/>
+    <!-- Tab 补全键位提示 -->
+    <rect x="88" y="103" width="8" height="6" rx="2" fill="#FFFFFF" opacity="0.22"/>
+  </g>
+
+  <!-- 整体斜向折射高光 -->
+  <rect x="0" y="0" width="128" height="128" rx="28" fill="url(#sheen)"/>
+
+  <!-- 外圈描边 -->
+  <rect x="0.75" y="0.75" width="126.5" height="126.5" rx="27.5"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="1.5"/>
+</svg>

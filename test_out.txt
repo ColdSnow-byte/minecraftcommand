@@ -1,0 +1,41 @@
+﻿cargo :    Compiling rust_lib_minecraftcommand v0.1.0 (C:\Users\admin\AndroidStudioProjects\minecraftcommand\rust)
+所在位置 C:\Users\admin\AppData\Local\Temp\genie-ps-1789893497365-jsh3ie.ps1:813 字符: 10
++ cd rust; cargo test 2>&1 | Out-File -FilePath ..\test_out.txt -Encodi ...
++          ~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ru...ftcommand\rust):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.44s
+     Running unittests src\lib.rs (target\debug\deps\rust_lib_minecraftcommand-75739a59c6eba22e.exe)
+
+running 27 tests
+test api::minecraft::tests::complete_flag_true_for_full_command ... ok
+test api::minecraft::tests::execute_too_many_args_fails ... ok
+test api::minecraft::tests::execute_clause_suggestions ... ok
+test api::minecraft::tests::execute_clause_error_position ... ok
+test api::minecraft::tests::execute_success ... ok
+test api::minecraft::tests::execute_run_inner_live_analysis ... ok
+test api::minecraft::tests::execute_command_invalid_inner_fails ... ok
+test api::minecraft::tests::command_count_matches_expectation ... ok
+test api::minecraft::tests::execute_command_runs_inner ... ok
+test api::minecraft::tests::execute_incomplete_fails ... ok
+test api::minecraft::tests::execute_unknown_block_fails ... ok
+test api::minecraft::tests::list_commands_nonempty ... ok
+test api::minecraft::tests::replace_start_points_at_partial_token ... ok
+test api::minecraft::tests::hint_at_cursor ... ok
+test api::minecraft::tests::new_command_suggestions ... ok
+test api::minecraft::tests::new_command_suggestions_batch2 ... ok
+test api::minecraft::tests::suggest_items_with_prefix ... ok
+test api::minecraft::tests::suggest_command_names ... ok
+test api::minecraft::tests::syntax_error_has_position ... ok
+test api::minecraft::tests::server_admin_commands ... ok
+test api::minecraft::tests::misc_commands ... ok
+test api::minecraft::tests::execute_positioned_and_if ... ok
+test api::minecraft::tests::execute_aliases_and_subcommands ... ok
+test api::minecraft::tests::required_commands ... ok
+test api::minecraft::tests::recommended_commands ... ok
+test api::minecraft::tests::server_admin_commands_batch2 ... ok
+test api::minecraft::tests::world_and_feature_commands ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
