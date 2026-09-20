@@ -1,4 +1,4 @@
-﻿; Minecraft 26.3 指令台 — Windows 安装包脚本（Inno Setup 6）
+﻿; Minecraft 指令台 — Windows 安装包脚本（Inno Setup 6）
 ;
 ; 用法：
 ;   powershell -File packaging\windows\build_installer.ps1
@@ -7,7 +7,7 @@
 ;
 ; 注意：版本号需与 pubspec.yaml 的 version 保持一致。
 
-#define MyAppName "Minecraft 指令台"
+#define MyAppName "Minecraft"
 #define MyAppNameEn "MinecraftCommand"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "minecraftcommand"

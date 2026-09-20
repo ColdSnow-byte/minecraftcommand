@@ -165,7 +165,7 @@ class _CommandConsolePageState extends State<CommandConsolePage> {
       quality: _kQuality,
       maxWidth: 420,
       barrierDismissible: true,
-      title: 'Minecraft 26.3 指令台',
+      title: 'Minecraft 指令台',
       actions: [
         GlassDialogAction(
           label: '关闭',
@@ -194,10 +194,8 @@ class _CommandConsolePageState extends State<CommandConsolePage> {
                 const SizedBox(height: 10),
                 const _SectionTitle('软件信息'),
                 const _InfoRow('版本', version),
-                _InfoRow('内置指令', '$count 条（含别名）'),
-                const _InfoRow('解析引擎', 'Rust · flutter_rust_bridge 2.13'),
-                const _InfoRow('界面框架', 'Flutter · liquid_glass_widgets'),
-                const _InfoRow('支持平台', 'Windows / Android / Web'),
+                _InfoRow('内置指令', '$count 条'),
+                const _InfoRow('支持平台', 'Windows / Android'),
                 const SizedBox(height: 14),
                 const _SectionTitle('软件操作'),
                 const _StepRow(1, '输入以 / 开头的指令，例如 /give @a diamond 64'),
@@ -361,7 +359,7 @@ class _CommandConsolePageState extends State<CommandConsolePage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: const [
                 Text(
-                  'Minecraft 26.3 指令台',
+                  'Minecraft CommandLine',
                   style: TextStyle(
                     color: _textPrimary,
                     fontSize: 19,
@@ -371,7 +369,7 @@ class _CommandConsolePageState extends State<CommandConsolePage> {
                 ),
                 SizedBox(height: 2),
                 Text(
-                  'Liquid Glass · Rust 引擎驱动',
+                  'Rust 引擎驱动',
                   style: TextStyle(color: _textTertiary, fontSize: 12),
                 ),
               ],
