@@ -6,6 +6,10 @@
 //! - 带位置信息的语法错误（errors）
 //! - 指令模拟执行（execute）
 
+mod registry;
+
+use registry as reg;
+
 // ─────────────────────────── 暴露给 Dart 的类型 ───────────────────────────
 
 /// 一条补全建议
@@ -69,7 +73,6 @@ pub struct CommandInfo {
 enum ArgType {
     Selector,
     Gamemode,
-    Block,
     Item,
     Effect,
     Enchant,
@@ -102,6 +105,10 @@ enum ArgType {
     Criteria,
     /// 记分板显示槽位
     DisplaySlot,
+    /// 记分板的数字渲染类型
+    RenderType,
+    /// 记分板运算符号（`+=`、`*=` 等）
+    Operation,
     /// 结构名称（locate）
     Structure,
     /// 生物群系（locate biome）
@@ -131,6 +138,14 @@ enum ArgType {
     Feature,
     /// 手（主手/副手）
     Hand,
+    // ── 带附加数据的参数 ──
+    /// 带附加数据的物品：`diamond_sword[minecraft:enchantments={...}]`，
+    /// 也兼容 1.20.4 以前的旧式写法 `diamond_sword{Enchantments:[...]}`（`/give` 用）
+    ItemStack,
+    /// 带方块状态或 NBT 的方块：`oak_stairs[facing=north]`、`chest{Items:[]}`
+    BlockStack,
+    /// 实体 / 方块的 NBT 复合标签：`{IsBaby:1b,CustomName:'"宝宝"'}`
+    Nbt,
 }
 
 #[derive(Clone)]
@@ -178,11 +193,11 @@ fn commands() -> Vec<Cmd> {
         Cmd {
             name: "give",
             aliases: &[],
-            desc: "给予玩家物品",
+            desc: "给予玩家物品（可带物品组件或 NBT）",
             op: true,
             branches: vec![
-                vec![arg("target", ArgType::Selector), arg("item", ArgType::Item)],
-                vec![arg("target", ArgType::Selector), arg("item", ArgType::Item), opt("count", ArgType::Int)],
+                vec![arg("target", ArgType::Selector), arg("item", ArgType::ItemStack)],
+                vec![arg("target", ArgType::Selector), arg("item", ArgType::ItemStack), opt("count", ArgType::Int)],
             ],
         },
         Cmd {
@@ -192,6 +207,14 @@ fn commands() -> Vec<Cmd> {
             op: true,
             branches: vec![
                 vec![arg("target", ArgType::Selector)],
+                vec![arg("target", ArgType::Selector), arg("destination", ArgType::Selector)],
+                {
+                    let mut v = vec![arg("target", ArgType::Selector)];
+                    v.extend(pos3());
+                    v.push(opt("yaw", ArgType::Float));
+                    v.push(opt("pitch", ArgType::Float));
+                    v
+                },
                 pos3(),
                 {
                     let mut v = pos3();
@@ -227,13 +250,20 @@ fn commands() -> Vec<Cmd> {
         Cmd {
             name: "summon",
             aliases: &[],
-            desc: "生成实体",
+            desc: "生成实体（可带 NBT）",
             op: true,
             branches: vec![
                 vec![arg("entity", ArgType::Entity)],
+                vec![arg("entity", ArgType::Entity), opt("nbt", ArgType::Nbt)],
                 {
                     let mut v = vec![arg("entity", ArgType::Entity)];
                     v.extend(pos3());
+                    v
+                },
+                {
+                    let mut v = vec![arg("entity", ArgType::Entity)];
+                    v.extend(pos3());
+                    v.push(opt("nbt", ArgType::Nbt));
                     v
                 },
             ],
@@ -241,17 +271,17 @@ fn commands() -> Vec<Cmd> {
         Cmd {
             name: "setblock",
             aliases: &[],
-            desc: "放置单个方块",
+            desc: "放置单个方块（可带方块状态或 NBT）",
             op: true,
             branches: vec![
                 {
                     let mut v = pos3();
-                    v.push(arg("block", ArgType::Block));
+                    v.push(arg("block", ArgType::BlockStack));
                     v
                 },
                 {
                     let mut v = pos3();
-                    v.push(arg("block", ArgType::Block));
+                    v.push(arg("block", ArgType::BlockStack));
                     v.push(opt("mode", ArgType::ClearMode));
                     v
                 },
@@ -260,19 +290,19 @@ fn commands() -> Vec<Cmd> {
         Cmd {
             name: "fill",
             aliases: &[],
-            desc: "填充区域方块",
+            desc: "填充区域方块（可带方块状态或 NBT）",
             op: true,
             branches: vec![
                 {
                     let mut v = pos3();
                     v.extend(pos3());
-                    v.push(arg("block", ArgType::Block));
+                    v.push(arg("block", ArgType::BlockStack));
                     v
                 },
                 {
                     let mut v = pos3();
                     v.extend(pos3());
-                    v.push(arg("block", ArgType::Block));
+                    v.push(arg("block", ArgType::BlockStack));
                     v.push(opt("mode", ArgType::FillMode));
                     v
                 },
@@ -491,7 +521,7 @@ fn commands() -> Vec<Cmd> {
                 {
                     let mut v = vec![lit("if"), lit("block")];
                     v.extend(pos3());
-                    v.push(arg("block", ArgType::Block));
+                    v.push(arg("block", ArgType::BlockStack));
                     v.push(lit("run"));
                     v.push(arg("command", ArgType::Command));
                     v
@@ -509,16 +539,138 @@ fn commands() -> Vec<Cmd> {
             desc: "管理记分板",
             op: true,
             branches: vec![
+                // ── objectives ──
                 vec![lit("objectives"), lit("list")],
-                vec![lit("objectives"), lit("add"), arg("name", ArgType::Objective), arg("criteria", ArgType::Criteria)],
-                vec![lit("objectives"), lit("remove"), arg("name", ArgType::Objective)],
-                vec![lit("objectives"), lit("setdisplay"), arg("slot", ArgType::DisplaySlot), opt("name", ArgType::Objective)],
+                vec![
+                    lit("objectives"),
+                    lit("add"),
+                    arg("objective", ArgType::Objective),
+                    arg("criteria", ArgType::Criteria),
+                ],
+                vec![
+                    lit("objectives"),
+                    lit("add"),
+                    arg("objective", ArgType::Objective),
+                    arg("criteria", ArgType::Criteria),
+                    opt("displayName", ArgType::Greedy),
+                ],
+                vec![lit("objectives"), lit("remove"), arg("objective", ArgType::Objective)],
+                vec![
+                    lit("objectives"),
+                    lit("setdisplay"),
+                    arg("slot", ArgType::DisplaySlot),
+                    opt("objective", ArgType::Objective),
+                ],
+                vec![
+                    lit("objectives"),
+                    lit("modify"),
+                    arg("objective", ArgType::Objective),
+                    lit("displayname"),
+                    arg("displayName", ArgType::Greedy),
+                ],
+                vec![
+                    lit("objectives"),
+                    lit("modify"),
+                    arg("objective", ArgType::Objective),
+                    lit("rendertype"),
+                    arg("rendertype", ArgType::RenderType),
+                ],
+                vec![
+                    lit("objectives"),
+                    lit("modify"),
+                    arg("objective", ArgType::Objective),
+                    lit("numberformat"),
+                    lit("styled"),
+                ],
+                vec![
+                    lit("objectives"),
+                    lit("modify"),
+                    arg("objective", ArgType::Objective),
+                    lit("numberformat"),
+                    lit("blank"),
+                ],
+                vec![
+                    lit("objectives"),
+                    lit("modify"),
+                    arg("objective", ArgType::Objective),
+                    lit("numberformat"),
+                    lit("fixed"),
+                    arg("contents", ArgType::Greedy),
+                ],
+                // ── players ──
                 vec![lit("players"), lit("list"), opt("target", ArgType::Selector)],
-                vec![lit("players"), lit("get"), arg("target", ArgType::Selector), arg("name", ArgType::Objective)],
-                vec![lit("players"), lit("set"), arg("target", ArgType::Selector), arg("name", ArgType::Objective), arg("score", ArgType::Int)],
-                vec![lit("players"), lit("add"), arg("target", ArgType::Selector), arg("name", ArgType::Objective), arg("score", ArgType::Int)],
-                vec![lit("players"), lit("remove"), arg("target", ArgType::Selector), arg("name", ArgType::Objective), arg("score", ArgType::Int)],
-                vec![lit("players"), lit("reset"), arg("target", ArgType::Selector), opt("name", ArgType::Objective)],
+                vec![
+                    lit("players"),
+                    lit("get"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                ],
+                vec![
+                    lit("players"),
+                    lit("set"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                    arg("score", ArgType::Int),
+                ],
+                vec![
+                    lit("players"),
+                    lit("add"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                    arg("score", ArgType::Int),
+                ],
+                vec![
+                    lit("players"),
+                    lit("remove"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                    arg("score", ArgType::Int),
+                ],
+                vec![
+                    lit("players"),
+                    lit("reset"),
+                    arg("target", ArgType::Selector),
+                    opt("objective", ArgType::Objective),
+                ],
+                vec![
+                    lit("players"),
+                    lit("enable"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                ],
+                vec![
+                    lit("players"),
+                    lit("operation"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                    arg("operation", ArgType::Operation),
+                    arg("source", ArgType::Selector),
+                    arg("sourceObjective", ArgType::Objective),
+                ],
+                vec![
+                    lit("players"),
+                    lit("display"),
+                    lit("name"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                    arg("displayName", ArgType::Greedy),
+                ],
+                vec![
+                    lit("players"),
+                    lit("display"),
+                    lit("numberformat"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                    lit("styled"),
+                ],
+                vec![
+                    lit("players"),
+                    lit("display"),
+                    lit("numberformat"),
+                    arg("target", ArgType::Selector),
+                    arg("objective", ArgType::Objective),
+                    lit("blank"),
+                ],
             ],
         },
         Cmd {
@@ -530,8 +682,8 @@ fn commands() -> Vec<Cmd> {
                 vec![lit("get"), lit("entity"), arg("target", ArgType::Selector)],
                 vec![lit("get"), lit("entity"), arg("target", ArgType::Selector), opt("path", ArgType::Word)],
                 vec![lit("get"), lit("block"), arg("x", ArgType::Position), arg("y", ArgType::Position), arg("z", ArgType::Position)],
-                vec![lit("merge"), lit("entity"), arg("target", ArgType::Selector), arg("nbt", ArgType::Json)],
-                vec![lit("merge"), lit("block"), arg("x", ArgType::Position), arg("y", ArgType::Position), arg("z", ArgType::Position), arg("nbt", ArgType::Json)],
+                vec![lit("merge"), lit("entity"), arg("target", ArgType::Selector), arg("nbt", ArgType::Nbt)],
+                vec![lit("merge"), lit("block"), arg("x", ArgType::Position), arg("y", ArgType::Position), arg("z", ArgType::Position), arg("nbt", ArgType::Nbt)],
             ],
         },
         Cmd {
@@ -653,10 +805,10 @@ fn commands() -> Vec<Cmd> {
             desc: "修改实体/方块物品栏",
             op: true,
             branches: vec![
-                vec![lit("replace"), lit("block"), arg("x", ArgType::Position), arg("y", ArgType::Position), arg("z", ArgType::Position), arg("slot", ArgType::Slot), arg("item", ArgType::Item)],
-                vec![lit("replace"), lit("block"), arg("x", ArgType::Position), arg("y", ArgType::Position), arg("z", ArgType::Position), arg("slot", ArgType::Slot), arg("item", ArgType::Item), opt("count", ArgType::Int)],
-                vec![lit("replace"), lit("entity"), arg("target", ArgType::Selector), arg("slot", ArgType::Slot), arg("item", ArgType::Item)],
-                vec![lit("replace"), lit("entity"), arg("target", ArgType::Selector), arg("slot", ArgType::Slot), arg("item", ArgType::Item), opt("count", ArgType::Int)],
+                vec![lit("replace"), lit("block"), arg("x", ArgType::Position), arg("y", ArgType::Position), arg("z", ArgType::Position), arg("slot", ArgType::Slot), arg("item", ArgType::ItemStack)],
+                vec![lit("replace"), lit("block"), arg("x", ArgType::Position), arg("y", ArgType::Position), arg("z", ArgType::Position), arg("slot", ArgType::Slot), arg("item", ArgType::ItemStack), opt("count", ArgType::Int)],
+                vec![lit("replace"), lit("entity"), arg("target", ArgType::Selector), arg("slot", ArgType::Slot), arg("item", ArgType::ItemStack)],
+                vec![lit("replace"), lit("entity"), arg("target", ArgType::Selector), arg("slot", ArgType::Slot), arg("item", ArgType::ItemStack), opt("count", ArgType::Int)],
                 vec![lit("modify"), lit("entity"), arg("target", ArgType::Selector), arg("slot", ArgType::Slot)],
             ],
         },
@@ -1235,222 +1387,16 @@ fn commands() -> Vec<Cmd> {
     ]
 }
 
-// ─────────────────────────── 数据表 ───────────────────────────
+// ─────────────────────────── 名字表 ───────────────────────────
+//
+// 方块 / 物品 / 实体 / 附魔 / 音效…… 全部集中在 `registry` 子模块里，
+// 这里只负责参数校验、补全与执行，不再内嵌数据。
 
-const BLOCKS: &[&str] = &[
-    "stone", "granite", "diorite", "andesite", "deepslate", "cobblestone", "dirt", "grass_block",
-    "podzol", "mycelium", "sand", "red_sand", "sandstone", "gravel", "clay", "oak_log",
-    "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log", "mangrove_log",
-    "cherry_log", "oak_leaves", "spruce_leaves", "birch_leaves", "oak_planks", "spruce_planks",
-    "birch_planks", "bedrock", "water", "lava", "ice", "packed_ice", "blue_ice", "snow_block",
-    "obsidian", "crying_obsidian", "netherrack", "soul_sand", "soul_soil", "end_stone",
-    "nether_bricks", "end_stone_bricks", "quartz_block", "glass", "tinted_glass", "glowstone",
-    "sea_lantern", "shroomlight", "jack_o_lantern", "bricks", "stone_bricks", "mossy_stone_bricks",
-    "cracked_stone_bricks", "chiseled_stone_bricks", "iron_block", "gold_block", "diamond_block",
-    "emerald_block", "netherite_block", "lapis_block", "redstone_block", "coal_block", "copper_block",
-    "amethyst_block", "bookshelf", "crafting_table", "furnace", "blast_furnace", "smoker",
-    "anvil", "chest", "ender_chest", "barrel", "hopper", "dropper", "dispenser", "observer",
-    "piston", "sticky_piston", "tnt", "torch", "soul_torch", "redstone_torch", "lantern",
-    "soul_lantern", "ladder", "scaffolding", "white_wool", "black_wool", "red_wool", "blue_wool",
-    "green_wool", "yellow_wool", "oak_door", "iron_door", "oak_fence", "oak_stairs",
-    "stone_stairs", "glass_pane", "flower_pot", "oak_sapling", "poppy", "dandelion",
-    "torchflower", "grass", "tall_grass", "fern", "azalea", "flowering_azalea", "moss_block",
-    "mud", "packed_mud", "mud_bricks", "calcite", "tuff", "dripstone_block", "copper_ore",
-    "iron_ore", "gold_ore", "diamond_ore", "emerald_ore", "lapis_ore", "redstone_ore",
-    "coal_ore", "nether_quartz_ore", "ancient_debris", "command_block", "chain_command_block",
-    "repeating_command_block", "structure_block", "beacon", "conduit", "respawn_anchor",
-    "lodestone", "bell", "crying_amethyst",
-];
 
-const ITEMS: &[&str] = &[
-    "diamond", "emerald", "iron_ingot", "gold_ingot", "copper_ingot", "netherite_ingot",
-    "netherite_scrap", "coal", "charcoal", "stick", "string", "feather", "flint", "leather",
-    "rabbit_hide", "paper", "book", "enchanted_book", "name_tag", "saddle", "elytra",
-    "totem_of_undying", "experience_bottle", "ender_pearl", "eye_of_ender", "fire_charge",
-    "gunpowder", "blaze_rod", "blaze_powder", "ghast_tear", "magma_cream", "slime_ball",
-    "ender_eye", "nether_star", "dragon_egg", "wooden_sword", "stone_sword", "iron_sword",
-    "golden_sword", "diamond_sword", "netherite_sword", "wooden_pickaxe", "stone_pickaxe",
-    "iron_pickaxe", "golden_pickaxe", "diamond_pickaxe", "netherite_pickaxe", "wooden_axe",
-    "stone_axe", "iron_axe", "diamond_axe", "netherite_axe", "wooden_shovel", "iron_shovel",
-    "diamond_shovel", "netherite_shovel", "bow", "crossbow", "arrow", "spectral_arrow",
-    "trident", "fishing_rod", "shears", "flint_and_steel", "bucket", "water_bucket",
-    "lava_bucket", "milk_bucket", "compass", "recovery_compass", "clock", "spyglass", "map",
-    "apple", "golden_apple", "enchanted_golden_apple", "bread", "cooked_beef", "cooked_porkchop",
-    "cooked_chicken", "cooked_cod", "cooked_salmon", "cake", "cookie", "pumpkin_pie",
-    "leather_helmet", "iron_helmet", "golden_helmet", "diamond_helmet", "netherite_helmet",
-    "iron_chestplate", "diamond_chestplate", "netherite_chestplate", "iron_leggings",
-    "diamond_leggings", "netherite_leggings", "iron_boots", "diamond_boots", "netherite_boots",
-    "potion", "splash_potion", "lingering_potion", "glow_berries", "sweet_berries", "melon_slice",
-];
 
-const EFFECTS: &[&str] = &[
-    "speed", "slowness", "haste", "mining_fatigue", "strength", "instant_health",
-    "instant_damage", "jump_boost", "nausea", "regeneration", "resistance", "fire_resistance",
-    "water_breathing", "invisibility", "blindness", "night_vision", "hunger", "weakness",
-    "poison", "wither", "health_boost", "absorption", "saturation", "glowing", "levitation",
-    "luck", "unluck", "slow_falling", "conduit_power", "dolphins_grace", "bad_omen",
-    "hero_of_the_village", "darkness", "trial_omen", "raid_omen", "wind_charged",
-    "weaving", "oozing", "infested",
-];
 
-const ENCHANTS: &[&str] = &[
-    "protection", "fire_protection", "feather_falling", "blast_protection", "projectile_protection",
-    "respiration", "aqua_affinity", "thorns", "depth_strider", "frost_walker", "binding_curse",
-    "soul_speed", "swift_sneak", "sharpness", "smite", "bane_of_arthropods", "knockback",
-    "fire_aspect", "looting", "sweeping_edge", "efficiency", "silk_touch", "unbreaking",
-    "fortune", "power", "punch", "flame", "infinity", "luck_of_the_sea", "lure", "loyalty",
-    "impaling", "riptide", "channeling", "multishot", "quick_charge", "piercing", "mending",
-    "vanishing_curse",
-];
 
-const ENTITIES: &[&str] = &[
-    "zombie", "skeleton", "creeper", "spider", "cave_spider", "enderman", "witch", "slime",
-    "magma_cube", "blaze", "ghast", "wither_skeleton", "piglin", "piglin_brute", "hoglin",
-    "zoglin", "husk", "stray", "drowned", "phantom", "silverfish", "endermite", "guardian",
-    "elder_guardian", "shulker", "vex", "vindicator", "evoker", "pillager", "ravager",
-    "warden", "breeze", "bogged", "wither", "ender_dragon", "cow", "pig", "sheep", "chicken",
-    "horse", "donkey", "mule", "wolf", "cat", "fox", "rabbit", "bee", "villager",
-    "wandering_trader", "iron_golem", "snow_golem", "bat", "squid", "glow_squid", "dolphin",
-    "turtle", "panda", "polar_bear", "llama", "trader_llama", "goat", "frog", "axolotl",
-    "allay", "sniffer", "camel", "armadillo", "boat", "minecart", "chest_minecart",
-    "tnt_minecart", "armor_stand", "item_frame", "painting", "falling_block", "tnt",
-    "experience_orb", "lightning_bolt", "firework_rocket", "area_effect_cloud", "marker",
-];
 
-const GAMERULES: &[&str] = &[
-    "announceAdvancements", "commandBlockOutput", "doDaylightCycle", "doFireTick",
-    "doMobLoot", "doMobSpawning", "doTileDrops", "doWeatherCycle", "keepInventory",
-    "logAdminCommands", "maxCommandChainLength", "mobGriefing", "naturalRegeneration",
-    "randomTickSpeed", "reducedDebugInfo", "sendCommandFeedback", "showCoordinates",
-    "showDeathMessages", "spectatorsGenerateChunks",
-];
-
-const STRUCTURES: &[&str] = &[
-    "village", "mansion", "monument", "stronghold", "fortress", "end_city", "buried_treasure",
-    "shipwreck", "pillager_outpost", "ruined_portal", "ancient_city", "trail_ruins",
-    "trial_chambers", "woodland_mansion", "ocean_ruin", "desert_pyramid", "jungle_temple",
-    "swamp_hut", "igloo", "mineshaft", "bastion_remnant", "nether_fossil",
-];
-
-const BIOMES: &[&str] = &[
-    "plains", "desert", "badlands", "jungle", "savanna", "taiga", "snowy_taiga", "snowy_plains",
-    "cherry_grove", "mangrove_swamp", "deep_dark", "lush_caves", "dripstone_caves",
-    "mushroom_fields", "flower_forest", "birch_forest", "dark_forest", "swamp", "beach",
-    "ocean", "deep_ocean", "frozen_peaks", "jagged_peaks", "stony_peaks", "meadow", "grove",
-    "river", "forest", "windswept_hills", "ice_spikes", "sunflower_plains", "old_growth_pine_taiga",
-];
-
-const DAMAGE_TYPES: &[&str] = &[
-    "arrow", "drowning", "fall", "fire", "lava", "explosion", "magic", "mob_attack",
-    "player_attack", "wither", "sonic_boom", "starve", "freeze", "lightning", "void",
-    "cactus", "cramming", "hot_floor", "in_wall", "out_of_world",
-];
-
-const SOUNDS: &[&str] = &[
-    "ambient.cave", "block.anvil.use", "block.bell.use", "block.chest.open", "block.chest.close",
-    "block.note_block.pling", "block.note_block.harp", "entity.player.levelup",
-    "entity.experience_orb.pickup", "entity.ender_dragon.growl", "entity.wither.spawn",
-    "entity.creeper.primed", "entity.blaze.shoot", "entity.ghast.shoot", "entity.generic.explode",
-    "entity.zombie.ambient", "entity.sheep.ambient", "entity.cat.ambient", "entity.wolf.ambient",
-    "entity.villager.no", "entity.villager.yes", "entity.piglin.admiring_item",
-    "item.trident.thunder", "item.goat_horn.play", "item.totem.use", "music.game",
-    "music.menu", "music.creative", "ui.toast.challenge_complete", "weather.rain.above",
-    "portal.travel", "total.xp",
-];
-
-const SOUND_SOURCES: &[&str] = &[
-    "master", "music", "record", "weather", "block", "hostile", "neutral", "player", "ambient", "voice",
-];
-
-const COLORS: &[&str] = &[
-    "black", "dark_blue", "dark_green", "dark_aqua", "dark_red", "dark_purple", "gold",
-    "gray", "dark_gray", "blue", "green", "aqua", "red", "light_purple", "yellow", "white",
-    "pink", "purple",
-];
-
-const BAR_STYLES: &[&str] = &[
-    "progress", "notched_6", "notched_10", "notched_12", "notched_20",
-];
-
-const MODIFIER_OPS: &[&str] = &[
-    "add_value", "add_multiplied_base", "add_multiplied_total",
-];
-
-const ATTRIBUTES: &[&str] = &[
-    "generic.max_health", "generic.movement_speed", "generic.attack_damage", "generic.armor",
-    "generic.armor_toughness", "generic.attack_speed", "generic.luck",
-    "generic.knockback_resistance", "generic.follow_range", "generic.flying_speed",
-    "generic.scale", "generic.step_height", "generic.jump_strength", "generic.gravity",
-    "generic.safe_fall_distance", "generic.fall_damage_multiplier", "generic.burning_time",
-    "player.block_interaction_range", "player.entity_interaction_range",
-    "player.block_break_speed", "player.mining_efficiency", "player.sneaking_speed",
-    "zombie.spawn_reinforcements",
-];
-
-const CRITERIA: &[&str] = &[
-    "dummy", "trigger", "deathCount", "playerKillCount", "totalKillCount", "health", "xp", "level",
-    "food", "air", "armor",
-];
-
-const DISPLAY_SLOTS: &[&str] = &[
-    "sidebar", "list", "belowName", "sidebar.team.black", "sidebar.team.dark_blue",
-    "sidebar.team.dark_green", "sidebar.team.dark_aqua", "sidebar.team.dark_red",
-    "sidebar.team.dark_purple", "sidebar.team.gold", "sidebar.team.gray",
-    "sidebar.team.dark_gray", "sidebar.team.blue", "sidebar.team.green", "sidebar.team.aqua",
-    "sidebar.team.red", "sidebar.team.light_purple", "sidebar.team.yellow", "sidebar.team.white",
-];
-
-const ADVANCEMENTS: &[&str] = &[
-    "story/root", "story/mine_stone", "story/upgrade_tools", "story/smelt_iron",
-    "story/obtain_armor", "story/lava_bucket", "story/iron_tools", "story/deflect_arrow",
-    "story/form_obsidian", "story/mine_diamond", "story/enter_the_nether", "story/enter_the_end",
-    "story/cure_zombie_villager", "story/follow_ender_eye", "nether/root", "nether/return_to_sender",
-    "nether/find_bastion", "nether/obtain_ancient_debris", "nether/fast_travel", "nether/all_effects",
-    "nether/summon_wither", "nether/all_potions", "nether/create_beacon", "nether/create_full_beacon",
-    "nether/brew_potion", "nether/distract_piglin", "nether/explore_nether", "nether/ride_strider",
-    "nether/uneasy_alliance", "end/root", "end/kill_dragon", "end/respawn_dragon", "end/dragon_egg",
-    "end/enter_end_gateway", "end/ride_dragon", "end/find_end_city", "end/levitate",
-    "adventure/root", "adventure/kill_a_mob", "adventure/trade", "adventure/shoot_arrow",
-    "adventure/kill_all_mobs", "adventure/totem_of_undying", "adventure/sleep_in_bed",
-    "adventure/hero_of_the_village", "adventure/voluntary_exile", "adventure/adventuring_time",
-    "adventure/throw_trident", "adventure/summon_iron_golem", "adventure/very_very_frightening",
-    "adventure/sniper_duel", "adventure/bullseye", "adventure/ol_betsy", "adventure/whos_the_pillager_now",
-    "adventure/arbalistic", "adventure/two_birds_one_arrow", "adventure/lightning_rod",
-    "husbandry/root", "husbandry/plant_seed", "husbandry/breed_an_animal", "husbandry/tame_an_animal",
-    "husbandry/feed_horses_safely", "husbandry/make_a_sign", "husbandry/safely_harvest_honey",
-    "husbandry/bred_all_animals", "husbandry/complete_catalogue", "husbandry/tactical_fishing",
-    "husbandry/balanced_diet", "husbandry/break_diamond_hoe", "husbandry/obtain_netherite_hoe",
-    "husbandry/fishy_business", "husbandry/silk_touch_nest", "husbandry/wax_on", "husbandry/wax_off",
-];
-
-const PARTICLES: &[&str] = &[
-    "ambient_entity_effect", "angry_villager", "ash", "block", "block_marker", "bubble",
-    "campfire_cosy_smoke", "campfire_signal_smoke", "cherry_leaves", "cloud", "composter",
-    "crimson_spore", "crit", "current_down", "damage_indicator", "dolphin", "dragon_breath",
-    "dripping_dripstone_lava", "dripping_dripstone_water", "dripping_honey", "dripping_lava",
-    "dripping_obsidian_tear", "dripping_water", "dust", "dust_color_transition", "dust_pillar",
-    "effect", "egg_crack", "elder_guardian", "enchant", "enchanted_hit", "end_rod", "entity_effect",
-    "explosion", "explosion_emitter", "falling_dripstone_lava", "falling_dripstone_water",
-    "falling_dust", "falling_honey", "falling_lava", "falling_nectar", "falling_obsidian_tear",
-    "falling_spore_blossom", "falling_water", "firework", "fishing", "flame", "flash", "glow",
-    "glow_squid_ink", "gust", "gust_dust", "happy_villager", "heart", "infested", "instant_effect",
-    "item", "item_slime", "item_snowball", "landing_honey", "landing_lava", "landing_obsidian_tear",
-    "large_smoke", "lava", "mycelium", "nautilus", "note", "ominous_spawning", "poof", "portal",
-    "raid_omen", "rain", "reverse_portal", "sculk_charge", "sculk_charge_pop", "sculk_soul",
-    "shriek", "small_flame", "smoke", "sneeze", "sonic_boom", "soul", "soul_fire_flame", "spit",
-    "splash", "spore_blossom", "squid_ink", "sweep_attack", "totem_of_undying", "trial_omen",
-    "trial_spawner_detection", "underwater", "vault_connection", "vibration", "warped_spore",
-    "wax_off", "wax_on", "white_ash", "white_smoke", "witch", "wrapped_spore_blossom",
-];
-
-const PLACE_FEATURES: &[&str] = &[
-    "ancient_city", "bastion_remnant", "buried_treasure", "desert_pyramid", "end_city", "fortress",
-    "igloo", "jungle_temple", "mineshaft", "monument", "nether_fossil", "ocean_ruin",
-    "pillager_outpost", "ruined_portal", "shipwreck", "stronghold", "swamp_hut", "trail_ruins",
-    "trial_chambers", "village", "woodland_mansion",
-];
-
-const HANDS: &[&str] = &["mainhand", "offhand"];
 
 /// 校验标识符（字母/数字/_-.，可带命名空间前缀）
 fn validate_word(s: &str) -> bool {
@@ -1483,12 +1429,12 @@ fn validate_slot(s: &str) -> bool {
 fn enum_values(ty: ArgType) -> Option<&'static [&'static str]> {
     match ty {
         ArgType::Gamemode => Some(&["survival", "creative", "adventure", "spectator"]),
-        ArgType::Block => Some(BLOCKS),
-        ArgType::Item => Some(ITEMS),
-        ArgType::Effect => Some(EFFECTS),
-        ArgType::Enchant => Some(ENCHANTS),
-        ArgType::Entity => Some(ENTITIES),
-        ArgType::Rule => Some(GAMERULES),
+        ArgType::BlockStack => Some(reg::blocks()),
+        ArgType::Item | ArgType::ItemStack => Some(reg::items()),
+        ArgType::Effect => Some(reg::EFFECTS),
+        ArgType::Enchant => Some(reg::ENCHANTS),
+        ArgType::Entity => Some(reg::ENTITIES),
+        ArgType::Rule => Some(reg::GAMERULES),
         ArgType::Weather => Some(&["clear", "rain", "thunder"]),
         ArgType::Difficulty => Some(&["peaceful", "easy", "normal", "hard"]),
         ArgType::Bool => Some(&["true", "false"]),
@@ -1498,21 +1444,23 @@ fn enum_values(ty: ArgType) -> Option<&'static [&'static str]> {
         ArgType::TimeQuery => Some(&["day", "daytime", "gametime"]),
         ArgType::XpUnit => Some(&["points", "levels"]),
         ArgType::TitleAction => Some(&["title", "subtitle", "actionbar"]),
-        ArgType::Structure => Some(STRUCTURES),
-        ArgType::Biome => Some(BIOMES),
-        ArgType::DamageType => Some(DAMAGE_TYPES),
-        ArgType::Sound => Some(SOUNDS),
-        ArgType::SoundSource => Some(SOUND_SOURCES),
-        ArgType::Color => Some(COLORS),
-        ArgType::BarStyle => Some(BAR_STYLES),
-        ArgType::ModifierOp => Some(MODIFIER_OPS),
-        ArgType::Attribute => Some(ATTRIBUTES),
-        ArgType::Criteria => Some(CRITERIA),
-        ArgType::DisplaySlot => Some(DISPLAY_SLOTS),
-        ArgType::Advancement => Some(ADVANCEMENTS),
-        ArgType::Particle => Some(PARTICLES),
-        ArgType::Feature => Some(PLACE_FEATURES),
-        ArgType::Hand => Some(HANDS),
+        ArgType::Structure => Some(reg::STRUCTURES),
+        ArgType::Biome => Some(reg::BIOMES),
+        ArgType::DamageType => Some(reg::DAMAGE_TYPES),
+        ArgType::Sound => Some(reg::SOUNDS),
+        ArgType::SoundSource => Some(reg::SOUND_SOURCES),
+        ArgType::Color => Some(reg::COLORS),
+        ArgType::BarStyle => Some(reg::BAR_STYLES),
+        ArgType::ModifierOp => Some(reg::MODIFIER_OPS),
+        ArgType::Attribute => Some(reg::ATTRIBUTES),
+        ArgType::Criteria => Some(reg::CRITERIA),
+        ArgType::DisplaySlot => Some(reg::DISPLAY_SLOTS),
+        ArgType::RenderType => Some(&["integer", "hearts"]),
+        ArgType::Operation => Some(&["=", "+=", "-=", "*=", "/=", "%=", "><", "<", ">"]),
+        ArgType::Advancement => Some(reg::ADVANCEMENTS),
+        ArgType::Particle => Some(reg::PARTICLES),
+        ArgType::Feature => Some(reg::PLACE_FEATURES),
+        ArgType::Hand => Some(reg::HANDS),
         _ => None,
     }
 }
@@ -1521,7 +1469,6 @@ fn describe(ty: ArgType) -> &'static str {
     match ty {
         ArgType::Selector => "目标选择器（@a 全体玩家 / @p 最近玩家 / @r 随机玩家 / @s 自己 / 玩家名）",
         ArgType::Gamemode => "游戏模式：survival / creative / adventure / spectator",
-        ArgType::Block => "方块 ID，例如 stone、diamond_block",
         ArgType::Item => "物品 ID，例如 diamond_sword",
         ArgType::Effect => "状态效果 ID，例如 speed、regeneration",
         ArgType::Enchant => "附魔 ID，例如 sharpness",
@@ -1548,6 +1495,8 @@ fn describe(ty: ArgType) -> &'static str {
         ArgType::Objective => "记分板目标名（字母/数字/_-.+）",
         ArgType::Criteria => "判据：dummy / trigger / deathCount 等",
         ArgType::DisplaySlot => "显示槽位：sidebar / list / belowName 等",
+        ArgType::RenderType => "数字渲染：integer（整数）或 hearts（心形）",
+        ArgType::Operation => "运算：= / += / -= / *= / /= / %= / >< / < / >",
         ArgType::Structure => "结构名称，例如 village、ancient_city",
         ArgType::Biome => "生物群系，例如 plains、cherry_grove",
         ArgType::DamageType => "伤害类型，例如 fall、explosion",
@@ -1562,6 +1511,11 @@ fn describe(ty: ArgType) -> &'static str {
         ArgType::Particle => "粒子 ID，例如 flame、dust",
         ArgType::Feature => "地物名称，例如 village、ancient_city",
         ArgType::Hand => "mainhand 或 offhand",
+        ArgType::ItemStack => {
+            "物品 ID，可用 [组件] 附加数据（如 [minecraft:enchantments={levels:{\"minecraft:sharpness\":5}}]），也支持旧式 {...} NBT"
+        }
+        ArgType::BlockStack => "方块 ID，可带方块状态 [facing=north] 或 NBT {Items:[]}",
+        ArgType::Nbt => "NBT 复合标签，例如 {IsBaby:1b} 或 {CustomName:'\"名字\"'}",
     }
 }
 
@@ -1657,20 +1611,33 @@ fn validate_arg(ty: ArgType, s: &str) -> Result<(), String> {
                 s.parse::<i64>().map(|_| ()).map_err(|_| "规则值应为 true、false 或整数".to_string())
             }
         }
-        ArgType::Block | ArgType::Item | ArgType::Entity => {
-            if !validate_id(s) {
-                return Err(format!("“{s}”不是有效的 ID 格式（小写字母/数字/下划线）"));
+        ArgType::ItemStack => validate_stack(reg::items(), s, "物品"),
+        ArgType::BlockStack => validate_stack(reg::blocks(), s, "方块"),
+        ArgType::Nbt => {
+            if !s.starts_with('{') {
+                return Err(format!("“{s}”不是 NBT 复合标签，应写成 {{...}} 形式"));
             }
-            let table = match ty {
-                ArgType::Block => BLOCKS,
-                ArgType::Item => ITEMS,
-                _ => ENTITIES,
+            check_balanced(s)
+        }
+        ArgType::Item | ArgType::Entity => {
+            let (table, kind) = match ty {
+                ArgType::Item => (reg::items(), "物品"),
+                _ => (reg::ENTITIES, "实体"),
             };
+            validate_in_table(table, s, kind)
+        }
+        ArgType::Criteria => {
+            let table = enum_values(ty).unwrap();
             let id = s.strip_prefix("minecraft:").unwrap_or(s);
-            if table.contains(&id) {
+            // 判据随版本增删很快（`teamkill.red`、`minecraft.custom:...` 之类），
+            // 所以表内的直接放行，带 `.` / `:` 的统计类也放行，
+            // 只拦 `dumy` 这种明显拼错的写法。
+            if table.contains(&id) || s.contains('.') || s.contains(':') {
                 Ok(())
             } else {
-                Err(format!("未知的{}：“{s}”", if ty == ArgType::Block { "方块" } else if ty == ArgType::Item { "物品" } else { "实体" }))
+                Err(format!(
+                    "未知的判据“{s}”，可选：dummy / trigger / deathCount / totalKillCount 等"
+                ))
             }
         }
         ty if enum_values(ty).is_some() => {
@@ -1686,6 +1653,180 @@ fn validate_arg(ty: ArgType, s: &str) -> Result<(), String> {
     }
 }
 
+// ─────────────────────────── 物品附加数据（组件 / NBT） ───────────────────────────
+
+/// 把 `diamond_sword[...]` / `diamond_sword{...}` 拆成 (物品 ID, 附加数据)
+fn split_item_stack(s: &str) -> (&str, Option<&str>) {
+    match s.find(|c| c == '[' || c == '{') {
+        Some(i) => (&s[..i], Some(&s[i..])),
+        None => (s, None),
+    }
+}
+
+/// 校验「ID + 可选附加数据」：ID 必须在表里，附加数据必须括号配对、引号闭合。
+///
+/// 组件名 / 方块状态名本身**不做白名单校验**——它们随版本增删很快，
+/// 硬报错容易误伤；名字是否正确交给补全列表去提示。
+fn validate_stack(table: &'static [&'static str], s: &str, kind: &str) -> Result<(), String> {
+    let (id, data) = split_item_stack(s);
+    validate_in_table(table, id, kind)?;
+    match data {
+        Some(d) => check_balanced(d),
+        None => Ok(()),
+    }
+}
+
+/// 校验一个纯 ID 是否在给定注册表里
+fn validate_in_table(table: &'static [&'static str], s: &str, kind: &str) -> Result<(), String> {
+    if !validate_id(s) {
+        return Err(format!("“{s}”不是有效的 ID 格式（小写字母/数字/下划线）"));
+    }
+    let id = s.strip_prefix("minecraft:").unwrap_or(s);
+    if table.contains(&id) {
+        Ok(())
+    } else {
+        Err(format!("未知的{kind}：“{s}”"))
+    }
+}
+
+/// 校验 `[...]` / `{...}` / `"..."` 是否配对闭合
+fn check_balanced(s: &str) -> Result<(), String> {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' | '{' | '(' => stack.push(ch),
+            ']' | '}' | ')' => {
+                let want = match ch {
+                    ']' => '[',
+                    '}' => '{',
+                    _ => '(',
+                };
+                if stack.pop() != Some(want) {
+                    return Err(format!("附加数据的括号不匹配：“{s}”"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if in_string {
+        return Err(format!("附加数据里的字符串缺少结尾的引号：“{s}”"));
+    }
+    if let Some(&open) = stack.last() {
+        let close = match open {
+            '[' => ']',
+            '{' => '}',
+            _ => ')',
+        };
+        return Err(format!("附加数据缺少结尾的 “{close}”"));
+    }
+    Ok(())
+}
+
+/// 取出附加数据里顶层的键名（忽略嵌套括号与引号内的分隔符）
+fn top_level_keys(inner: &str) -> Vec<String> {
+    let chars: Vec<char> = inner.chars().collect();
+    let mut keys = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0usize;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' | '{' | '(' => depth += 1,
+            ']' | '}' | ')' => depth -= 1,
+            ',' if depth == 0 => {
+                push_key_segment(&chars[start..i], &mut keys);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    push_key_segment(&chars[start..], &mut keys);
+    keys
+}
+
+fn push_key_segment(segment: &[char], keys: &mut Vec<String>) {
+    let text: String = segment.iter().collect();
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    // 先按 `=` 切：现代组件是 `minecraft:damage=5`，键名本身带命名空间冒号；
+    // 没有 `=` 再按 `:` 切：旧式 NBT 是 `Damage: 5`。
+    let name = match text.split_once('=') {
+        Some((key, _)) => key.trim(),
+        None => text.split(|c| c == ':').next().unwrap_or(text).trim(),
+    };
+    let name = name.trim_matches('"');
+    if !name.is_empty() {
+        keys.push(name.to_string());
+    }
+}
+
+/// 把附加数据概括成中文，用于执行后的反馈。例如
+/// `[minecraft:enchantments={...}]` → `附魔`；
+/// `{display:{...},Unbreakable:1}` → `展示信息（名称 / 描述 / 颜色）、无法破坏`
+fn summarize_item_data(data: &str) -> Option<String> {
+    let is_components = data.starts_with('[');
+    let inner = data.strip_prefix('[').or_else(|| data.strip_prefix('{'))?;
+    let inner = inner
+        .strip_suffix(']')
+        .or_else(|| inner.strip_suffix('}'))
+        .unwrap_or(inner);
+
+    let table: &[(&str, &str)] = if is_components {
+        reg::ITEM_COMPONENTS
+    } else {
+        reg::LEGACY_NBT_KEYS
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    for key in top_level_keys(inner) {
+        let plain = key.trim_start_matches("minecraft:");
+        let doc = table
+            .iter()
+            .find(|(name, _)| *name == key || name.trim_start_matches("minecraft:") == plain)
+            .map(|(_, doc)| (*doc).to_string())
+            .unwrap_or_else(|| plain.to_string());
+        if !parts.contains(&doc) {
+            parts.push(doc);
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("、"))
+    }
+}
+
 // ─────────────────────────── Token 化 ───────────────────────────
 
 struct Token {
@@ -1694,22 +1835,62 @@ struct Token {
     end: usize,
 }
 
-/// 按空格切分（保留每个 token 的字符区间）
+/// 按空格切分（保留每个 token 的字符区间）。
+///
+/// 切分时跳过 `[...]` / `{...}` 内部和 `"..."` 之间的空格：物品组件与 NBT
+/// 里经常带空格（`diamond_sword[minecraft:custom_name="Very Cool Sword"]`），
+/// 按空格硬切会把一个参数拆成好几段。
 fn tokenize(input: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut start: Option<usize> = None;
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let total = input.chars().count();
+
     for (i, ch) in input.chars().enumerate() {
-        if ch == ' ' {
+        // 先判断是否切分，再更新括号/引号状态，
+        // 这样 `[` 本身仍归属当前 token。
+        if ch == ' ' && depth == 0 && !in_string {
             if let Some(s) = start.take() {
-                tokens.push(Token { text: input.chars().skip(s).take(i - s).collect(), start: s, end: i });
+                tokens.push(Token {
+                    text: input.chars().skip(s).take(i - s).collect(),
+                    start: s,
+                    end: i,
+                });
             }
         } else if start.is_none() {
             start = Some(i);
         }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' | '{' | '(' => depth += 1,
+            ']' | '}' | ')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            // 多余的右括号不该让后面再也切不开
+            depth = 0;
+        }
     }
+
     if let Some(s) = start {
-        let total = input.chars().count();
-        tokens.push(Token { text: input.chars().skip(s).take(total - s).collect(), start: s, end: total });
+        tokens.push(Token {
+            text: input.chars().skip(s).take(total - s).collect(),
+            start: s,
+            end: total,
+        });
     }
     tokens
 }
@@ -1796,11 +1977,66 @@ fn advance(branch: &[Node], tokens: &[Token], n: usize) -> Vec<usize> {
     cur
 }
 
+// ─────────────────────────── 候选匹配 ───────────────────────────
+
+/// 大小写不敏感的子串查找，返回匹配处的字节索引
+fn find_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.len() > h.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
+/// 候选与输入的匹配打分，`None` 表示不匹配。分数越低越靠前：
+///
+/// - `0` 完全相同，`1` 前缀（`diam` → `diamond`）
+/// - `2` 词首（`wool` → `white_wool`，按 `_ . / :` 分词）
+/// - `10 + 位置` 普通子串（`eep` → `creeper`），位置越靠后越差
+///
+/// 这样「中间也能搜」，同时保证前缀命中永远排在最前面。
+fn match_score(candidate: &str, query: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let pos = find_ignore_case(candidate, query)?;
+
+    if pos == 0 {
+        return Some(if candidate.len() == query.len() { 0 } else { 1 });
+    }
+    if matches!(candidate.as_bytes()[pos - 1], b'_' | b'.' | b'/' | b':') {
+        return Some(2);
+    }
+    Some(10 + pos as u32)
+}
+
+/// 候选按匹配质量排序：先按名字去重，再按分数排。
+///
+/// 预先算好分数再排序，避免比较阶段反复扫描字符串。
+fn sort_suggestions(items: &mut Vec<Suggestion>, query: &str) {
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items.dedup_by(|a, b| a.label == b.label);
+    if query.is_empty() {
+        return;
+    }
+
+    let mut scored: Vec<(u32, Suggestion)> = items
+        .drain(..)
+        .map(|s| (match_score(&s.label, query).unwrap_or(u32::MAX), s))
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(&b.1.label)));
+    items.extend(scored.into_iter().map(|(_, s)| s));
+}
+
 fn node_candidates(node: &Node, partial: &str) -> Vec<Suggestion> {
     let mut out = Vec::new();
     match node {
         Node::Lit(w) => {
-            if w.starts_with(partial) {
+            if match_score(w, partial).is_some() {
                 out.push(Suggestion {
                     insert: w.to_string(),
                     label: w.to_string(),
@@ -1810,13 +2046,20 @@ fn node_candidates(node: &Node, partial: &str) -> Vec<Suggestion> {
             }
         }
         Node::Arg { ty, .. } => {
-            if let Some(values) = enum_values(*ty) {
+            // 带附加数据的参数要深入 `[...]` / `{...}` 内部继续补全
+            if *ty == ArgType::ItemStack {
+                out.extend(data_stack_candidates(*ty, reg::items(), partial));
+            } else if *ty == ArgType::BlockStack {
+                out.extend(data_stack_candidates(*ty, reg::blocks(), partial));
+            } else if *ty == ArgType::Nbt {
+                out.extend(nbt_candidates(partial));
+            } else if let Some(values) = enum_values(*ty) {
                 for v in values {
-                    if v.starts_with(partial) {
+                    if match_score(v, partial).is_some() {
                         out.push(Suggestion {
                             insert: v.to_string(),
                             label: v.to_string(),
-                            detail: describe(*ty).into(),
+                            detail: candidate_detail(*ty, v),
                             append_space: true,
                         });
                     }
@@ -1832,7 +2075,7 @@ fn node_candidates(node: &Node, partial: &str) -> Vec<Suggestion> {
                             ("@e", "所有实体"),
                         ];
                         for (v, d) in opts {
-                            if v.starts_with(partial) {
+                            if match_score(v, partial).is_some() {
                                 out.push(Suggestion {
                                     insert: v.to_string(),
                                     label: v.to_string(),
@@ -1844,7 +2087,7 @@ fn node_candidates(node: &Node, partial: &str) -> Vec<Suggestion> {
                     }
                     ArgType::Position => {
                         for v in ["~", "^", "0"] {
-                            if v.starts_with(partial) {
+                            if match_score(v, partial).is_some() {
                                 out.push(Suggestion {
                                     insert: v.to_string(),
                                     label: v.to_string(),
@@ -1855,7 +2098,7 @@ fn node_candidates(node: &Node, partial: &str) -> Vec<Suggestion> {
                         }
                     }
                     ArgType::Int => {
-                        if "1".starts_with(partial) || partial.is_empty() {
+                        if match_score("1", partial).is_some() {
                             out.push(Suggestion {
                                 insert: "1".into(),
                                 label: "1".into(),
@@ -1866,7 +2109,7 @@ fn node_candidates(node: &Node, partial: &str) -> Vec<Suggestion> {
                     }
                     ArgType::Time => {
                         for v in ["day", "night", "noon", "midnight", "1000"] {
-                            if v.starts_with(partial) {
+                            if match_score(v, partial).is_some() {
                                 out.push(Suggestion {
                                     insert: v.to_string(),
                                     label: v.to_string(),
@@ -1877,7 +2120,7 @@ fn node_candidates(node: &Node, partial: &str) -> Vec<Suggestion> {
                         }
                     }
                     ArgType::Json => {
-                        if "{\"text\":\"".starts_with(partial) || partial.is_empty() {
+                        if match_score("{\"text\":\"", partial).is_some() {
                             out.push(Suggestion {
                                 insert: "{\"text\":\"你好\"}".into(),
                                 label: "{\"text\":\"...\"}".into(),
@@ -1892,6 +2135,169 @@ fn node_candidates(node: &Node, partial: &str) -> Vec<Suggestion> {
         }
     }
     out
+}
+
+/// 补全候选右侧的说明文字。
+///
+/// 优先给出**这一条自己的中文名**：`aqua_affinity` → 水下速掘、
+/// `diamond_sword` → 钻石剑、`zombie` → 僵尸。
+/// 词典里查不到（例如进度 ID、显示槽位）才退回该参数类型的通用说明。
+fn candidate_detail(ty: ArgType, value: &str) -> String {
+    // 音效来源是独立语义：`block` / `music` / `record` 这些词在物品上下文里
+    // 是别的意思，所以单独给一套说法。
+    if ty == ArgType::SoundSource {
+        return match value {
+            "master" => "主音量（全部音效）",
+            "music" => "背景音乐",
+            "record" => "唱片机",
+            "weather" => "天气",
+            "block" => "方块音效",
+            "hostile" => "敌对生物",
+            "neutral" => "中立生物",
+            "player" => "玩家",
+            "ambient" => "环境音",
+            "voice" => "语音",
+            _ => describe(ty),
+        }
+        .to_string();
+    }
+
+    let zh = reg::localize(value);
+    if zh == value {
+        describe(ty).to_string()
+    } else {
+        zh
+    }
+}
+
+/// 带附加数据的参数的候选（物品 / 方块通用）：
+/// - 还没写 `[` / `{` → 补 ID 本身；
+/// - 写了 `[` → 补物品组件名；
+/// - 写了 `{` → 补 NBT 键名。
+///
+/// 插入的文本都是**整个 token**（`diamond[minecraft:enchantments=`），
+/// 因为补全替换的是光标所在的整个 token。
+fn data_stack_candidates(
+    ty: ArgType,
+    table: &'static [&'static str],
+    partial: &str,
+) -> Vec<Suggestion> {
+    let Some(open) = partial.find(|c| c == '[' || c == '{') else {
+        return table
+            .iter()
+            .filter(|v| match_score(v, partial).is_some())
+            .map(|v| Suggestion {
+                insert: (*v).to_string(),
+                label: (*v).to_string(),
+                detail: candidate_detail(ty, v),
+                append_space: true,
+            })
+            .collect();
+    };
+
+    let head = &partial[..open];
+    let inner = &partial[open + 1..];
+    let (before, segment) = split_last_segment(inner);
+
+    // `{Key: value}` → NBT 键名
+    if partial.as_bytes()[open] == b'{' {
+        return nbt_key_candidates(head, before, segment);
+    }
+
+    // 方块状态是每个方块各自一套枚举，猜不出该给什么，就不给候选
+    if ty == ArgType::BlockStack {
+        return Vec::new();
+    }
+
+    // `[组件=值]`，允许省略 `minecraft:` 前缀
+    let typing_namespace = segment.starts_with("minecraft:");
+    let partial_name = segment.strip_prefix("minecraft:").unwrap_or(segment);
+    let mut hits: Vec<&(&str, &str)> = reg::ITEM_COMPONENTS
+        .iter()
+        .filter(|(name, _)| {
+            let plain = name.trim_start_matches("minecraft:");
+            if typing_namespace {
+                // 已经敲到命名空间了，就只按组件名本身匹配
+                match_score(plain, partial_name).is_some()
+            } else {
+                match_score(name, segment).is_some() || match_score(plain, segment).is_some()
+            }
+        })
+        .collect();
+    // 短名优先：`lore` / `damage` / `food` 这类常用组件更容易被选中
+    hits.sort_by_key(|entry| entry.0.len());
+
+    hits.into_iter()
+        .map(|&(name, doc)| Suggestion {
+            insert: format!("{head}[{before}{name}="),
+            label: name.to_string(),
+            detail: doc.to_string(),
+            append_space: false,
+        })
+        .collect()
+}
+
+/// NBT 参数（`/summon`、`/data merge` 等）的候选
+fn nbt_candidates(partial: &str) -> Vec<Suggestion> {
+    let Some(inner) = partial.strip_prefix('{') else {
+        // 还没开始写，先给个骨架
+        return vec![Suggestion {
+            insert: "{".to_string(),
+            label: "{...}".to_string(),
+            detail: describe(ArgType::Nbt).to_string(),
+            append_space: false,
+        }];
+    };
+    let (before, segment) = split_last_segment(inner);
+    nbt_key_candidates("", before, segment)
+}
+
+/// 补 NBT 键名。[prefix] 是已经写好的开头（物品 ID 或空串）
+fn nbt_key_candidates(prefix: &str, before: &str, segment: &str) -> Vec<Suggestion> {
+    reg::LEGACY_NBT_KEYS
+        .iter()
+        .filter(|(name, _)| match_score(name, segment).is_some())
+        .map(|(name, doc)| Suggestion {
+            insert: format!("{prefix}{{{before}{name}:"),
+            label: (*name).to_string(),
+            detail: (*doc).to_string(),
+            append_space: false,
+        })
+        .collect()
+}
+
+/// 把「已经写完的组件」与「正在输入的这一段」分开：
+/// `a=1,b=2` → (`a=1,`, `b=2`)。会跳过嵌套括号与字符串里的逗号。
+fn split_last_segment(inner: &str) -> (&str, &str) {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut separator: Option<usize> = None;
+
+    for (i, ch) in inner.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' | '{' | '(' => depth += 1,
+            ']' | '}' | ')' => depth -= 1,
+            ',' if depth <= 0 => separator = Some(i),
+            _ => {}
+        }
+    }
+
+    match separator {
+        Some(i) => (&inner[..=i], inner[i + 1..].trim_start()),
+        None => ("", inner.trim_start()),
+    }
 }
 
 fn build_usage(cmd: &Cmd) -> String {
@@ -1971,8 +2377,8 @@ pub fn analyze(input: String, cursor: i32) -> AnalysisResult {
         let mut suggestions = Vec::new();
         if exact_hint {
             for c in commands() {
-                if c.name.starts_with(&partial)
-                    || c.aliases.iter().any(|a| a.starts_with(&partial))
+                if match_score(c.name, &partial).is_some()
+                    || c.aliases.iter().any(|a| match_score(a, &partial).is_some())
                 {
                     suggestions.push(Suggestion {
                         insert: c.name.to_string(),
@@ -2118,11 +2524,7 @@ pub fn analyze(input: String, cursor: i32) -> AnalysisResult {
         }
     }
 
-    suggestions.sort_by(|a, b| a.label.cmp(&b.label));
-    suggestions.dedup_by(|a, b| a.label == b.label);
-    if suggestions.len() > 12 {
-        suggestions.truncate(12);
-    }
+    sort_suggestions(&mut suggestions, &partial);
 
     AnalysisResult {
         suggestions,
@@ -2230,7 +2632,7 @@ fn check_execute_clauses(args: &[Token], body_char_offset: usize) -> Option<Synt
                             end,
                         });
                     };
-                    if let Err(e) = validate_arg(ArgType::Block, &block.text) {
+                    if let Err(e) = validate_arg(ArgType::BlockStack, &block.text) {
                         let (s, e2) = absolute_span(block, body_char_offset);
                         return Some(SyntaxError { message: e, start: s, end: e2 });
                     }
@@ -2289,7 +2691,7 @@ fn execute_clause_expect(args: &[Token], upto: usize) -> Option<ArgType> {
                         }
                     }
                     if i + 5 >= upto {
-                        return Some(ArgType::Block);
+                        return Some(ArgType::BlockStack);
                     }
                     i += 6;
                 }
@@ -2370,6 +2772,12 @@ fn analyze_execute(
     let mut hint = "execute 子句".to_string();
 
     let active = locate_cursor(args, cursor_body, body);
+    // 排序要用到输入片段，先取出来（`active` 随后会被 match 消费）
+    let query = active
+        .as_ref()
+        .map(|(_, p, _)| p.clone())
+        .unwrap_or_default();
+
     match active {
         Some((idx, partial, _rs)) => {
             if let Some(err) = check_execute_clauses(&args[..idx], body_char_offset) {
@@ -2383,7 +2791,7 @@ fn analyze_execute(
                 None => {
                     hint = "execute 子句".to_string();
                     for (kw, d) in EXECUTE_KEYWORDS {
-                        if kw.starts_with(&partial) {
+                        if match_score(kw, &partial).is_some() {
                             suggestions.push(Suggestion {
                                 insert: kw.to_string(),
                                 label: kw.to_string(),
@@ -2418,11 +2826,7 @@ fn analyze_execute(
         }
     }
 
-    suggestions.sort_by(|a, b| a.label.cmp(&b.label));
-    suggestions.dedup_by(|a, b| a.label == b.label);
-    if suggestions.len() > 12 {
-        suggestions.truncate(12);
-    }
+    sort_suggestions(&mut suggestions, &query);
 
     AnalysisResult {
         suggestions,
@@ -2593,283 +2997,434 @@ fn semantic_check(cmd_name: &str, args: &[String]) -> Result<(), String> {
 }
 
 fn execute_message(cmd_name: &str, args: &[String]) -> String {
+    // 展示用的参数：ID / 选择器 / 枚举关键字都翻成中文。
+    // 逻辑判断仍然用原始 `args`（`add`、`set` 这类子指令字面量不会被翻译）。
+    let cn: Vec<String> = args.iter().map(|a| reg::localize(a)).collect();
+
     match cmd_name {
         "gamemode" => {
-            let zh = match args[0].as_str() {
+            let mode = match args[0].as_str() {
                 "survival" => "生存模式",
                 "creative" => "创造模式",
                 "adventure" => "冒险模式",
                 _ => "旁观模式",
             };
             match args.get(1) {
-                Some(t) => format!("已将 {t} 的游戏模式切换为 {zh}"),
-                None => format!("已将自己的游戏模式切换为 {zh}"),
+                Some(_) => format!("已将 {} 的游戏模式切换为{mode}", cn[1]),
+                None => format!("已将自己的游戏模式切换为{mode}"),
             }
         }
         "give" => {
             let count = args.get(2).and_then(|c| c.parse::<i64>().ok()).unwrap_or(1);
-            let target = args[0].clone();
-            let item = args[1].strip_prefix("minecraft:").unwrap_or(&args[1]).to_string();
-            format!("已将 {count} 个 [minecraft:{item}] 给予 {target}")
+            // 只显示物品的中文名，附加数据用摘要说明，不把原始组件原样倒出来
+            let (id, data) = split_item_stack(&args[1]);
+            let item = reg::localize(id);
+            match data.and_then(summarize_item_data) {
+                Some(summary) => {
+                    format!("已将 {count} 个【{item}】给予 {}，附带：{summary}", cn[0])
+                }
+                None => format!("已将 {count} 个【{item}】给予 {}", cn[0]),
+            }
         }
         "tp" | "teleport" => {
-            if args.len() >= 3 && args[0].parse::<f64>().is_ok() {
-                format!("已传送到 ({}, {}, {})", args[0], args[1], args[2])
-            } else if args.len() == 1 {
-                format!("已传送到 {args0}", args0 = args[0])
+            // 首个参数是坐标（数字 / ~ / ^）就是"传送到某坐标"，否则是"传送某个目标"
+            let first_is_coord = args[0].starts_with('~')
+                || args[0].starts_with('^')
+                || args[0].parse::<f64>().is_ok();
+            if first_is_coord {
+                format!("已传送到坐标 ({}, {}, {})", args[0], args[1], args[2])
             } else {
-                "已传送".into()
+                match args.len() {
+                    1 => format!("已将【{}】传送到指令执行者身边", cn[0]),
+                    2 => format!("已将【{}】传送到【{}】的位置", cn[0], cn[1]),
+                    _ => format!(
+                        "已将【{}】传送到坐标 ({}, {}, {})",
+                        cn[0], args[1], args[2], args[3]
+                    ),
+                }
             }
         }
         "effect" => {
             if args[0] == "clear" {
                 match args.get(1) {
-                    Some(t) => format!("已清除 {t} 的所有状态效果"),
-                    None => "已清除自己的所有状态效果".into(),
+                    Some(_) => format!("已清除 {} 身上的所有状态效果", cn[1]),
+                    None => "已清除自己身上的所有状态效果".into(),
                 }
             } else {
                 let secs = args.get(3).cloned().unwrap_or_else(|| "30".into());
                 let amp = args.get(4).cloned().unwrap_or_else(|| "0".into());
-                format!("已给予 {} 效果 {}（{} 秒，等级 {}）", args[1], args[2], secs, amp.parse::<i64>().map(|a| a + 1).unwrap_or(1))
+                let level = amp.parse::<i64>().map(|a| a + 1).unwrap_or(1);
+                format!(
+                    "已给予 {} 状态效果【{}】，持续 {secs} 秒，等级 {level}",
+                    cn[1], cn[2]
+                )
             }
         }
         "enchant" => {
             let level = args.get(2).cloned().unwrap_or_else(|| "1".into());
-            format!("已将 {} {} 级附魔应用到 {} 手持的物品上", args[1], level, args[0])
+            format!("已为 {} 手持的物品附上【{}】{level} 级附魔", cn[0], cn[1])
         }
         "summon" => {
-            if args.len() >= 4 {
-                format!("已在 ({}, {}, {}) 生成 {}", args[1], args[2], args[3], args[0])
+            let place = if args.len() >= 4 {
+                format!("已在坐标 ({}, {}, {})", args[1], args[2], args[3])
             } else {
-                format!("已生成 {args0}", args0 = args[0])
+                "已在指令执行者的位置".to_string()
+            };
+            // 末尾的 `{...}` 是实体 NBT
+            let data = args
+                .last()
+                .filter(|a| a.starts_with('{'))
+                .and_then(|a| summarize_item_data(a));
+            match data {
+                Some(summary) => format!("{place} 生成【{}】，{summary}", cn[0]),
+                None => format!("{place} 生成【{}】", cn[0]),
             }
         }
-        "setblock" => format!("已将 ({}, {}, {}) 的方块更改为 {}", args[0], args[1], args[2], args[3]),
+        "setblock" => format!(
+            "已将坐标 ({}, {}, {}) 的方块设置为【{}】",
+            args[0], args[1], args[2], cn[3]
+        ),
         "fill" => {
-            if args.len() >= 7 {
-                format!("已填充 {} 个方块（{}）", "区域", args[6])
-            } else {
-                "已填充区域".into()
+            let region = format!(
+                "({}, {}, {}) 到 ({}, {}, {})",
+                args[0], args[1], args[2], args[3], args[4], args[5]
+            );
+            match args.get(7) {
+                Some(_) => format!("已将{region} 填充为【{}】，方式：{}", cn[6], cn[7]),
+                None => format!("已将{region} 填充为【{}】", cn[6]),
             }
         }
-        "clone" => "已成功克隆区域".into(),
+        "clone" => {
+            let source = format!(
+                "({}, {}, {}) 到 ({}, {}, {})",
+                args[0], args[1], args[2], args[3], args[4], args[5]
+            );
+            let target = format!("({}, {}, {})", args[6], args[7], args[8]);
+            match args.get(9) {
+                Some(_) => format!("已将{source} 的方块克隆到{target}，方式：{}", cn[9]),
+                None => format!("已将{source} 的方块克隆到{target}"),
+            }
+        }
         "kill" => match args.first() {
-            Some(t) => format!("已杀死 {t}"),
+            Some(_) => format!("已杀死{}", cn[0]),
             None => "已杀死自己".into(),
         },
         "clear" => match args.first() {
-            Some(t) => format!("已清除 {t} 的 {} 件物品", args.get(2).unwrap_or(&"若干".into())),
-            None => "已清除自己的物品栏".into(),
+            Some(_) => {
+                let item = match args.get(1) {
+                    Some(_) => format!("【{}】", cn[1]),
+                    None => "物品".to_string(),
+                };
+                let count = args.get(2).cloned().unwrap_or_else(|| "全部".into());
+                format!("已从 {} 的物品栏中清除了 {item} {count} 件", cn[0])
+            }
+            None => "已清空自己的物品栏".into(),
         },
         "time" => match args[0].as_str() {
             "set" => {
-                let zh = match args[1].as_str() {
+                let label = match args[1].as_str() {
                     "day" => "白天（1000 tick）",
                     "noon" => "正午（6000 tick）",
                     "night" => "夜晚（13000 tick）",
                     "midnight" => "午夜（18000 tick）",
-                    v => v,
+                    other => other,
                 };
-                format!("已将时间设置为 {zh}")
+                format!("已将时间设置为{label}")
             }
             "add" => format!("已将时间快进 {} tick", args[1]),
-            _ => format!("当前时间：{}", args[1]),
+            _ => format!("当前{}：{}", cn[1], args[1]),
         },
         "weather" => {
-            let zh = match args[0].as_str() {
+            let label = match args[0].as_str() {
                 "clear" => "晴天",
                 "rain" => "雨天",
                 _ => "雷暴",
             };
             match args.get(1) {
-                Some(d) => format!("已将天气设为 {zh}，持续 {d} 秒"),
-                None => format!("已将天气设为 {zh}"),
+                Some(d) => format!("已将天气设置为{label}，持续 {d} 秒"),
+                None => format!("已将天气设置为{label}"),
             }
         }
         "difficulty" => {
-            let zh = match args[0].as_str() {
+            let label = match args[0].as_str() {
                 "peaceful" => "和平",
                 "easy" => "简单",
                 "normal" => "普通",
                 _ => "困难",
             };
-            format!("已将游戏难度设为 {zh}")
+            format!("已将游戏难度设置为{label}")
         }
-        "say" => format!("[Server] {}", args.join(" ")),
-        "me" => format!("* 执行者 {}", args.join(" ")),
-        "tellraw" => format!("已向 {} 发送 JSON 消息：{}", args[0], args[1]),
+        "say" => format!("[服务器] {}", args.join(" ")),
+        "me" => format!("* 指令执行者 {}", args.join(" ")),
+        "tellraw" => format!("已向 {} 发送原始 JSON 消息：{}", cn[0], args[1]),
         "title" => {
             if args.get(1).map(|s| s.as_str()) == Some("times") {
-                format!("已设置标题时间：淡入 {}，停留 {}，淡出 {} tick", args[2], args[3], args[4])
+                format!(
+                    "已设置标题时长：淡入 {} tick，停留 {} tick，淡出 {} tick",
+                    args[2], args[3], args[4]
+                )
             } else {
-                format!("已向 {} 显示标题（{}）：{}", args[0], args[1], args[2..].join(" "))
+                format!("已向 {} 显示【{}】：{}", cn[0], cn[1], args[2..].join(" "))
             }
         }
         "xp" | "experience" => {
             let unit = args.get(3).cloned().unwrap_or_else(|| "points".into());
             if unit == "levels" {
-                format!("已给予 {} {} 级经验", args[1], args[2])
+                format!("已给予 {} {} 级经验值", cn[1], args[2])
             } else {
-                format!("已给予 {} {} 点经验", args[1], args[2])
+                format!("已给予 {} {} 点经验值", cn[1], args[2])
             }
         }
         "spawnpoint" => match args.first() {
-            Some(t) => format!("已将 {t} 的出生点设置为当前坐标"),
+            Some(_) => format!("已将 {} 的出生点设置为当前坐标", cn[0]),
             None => "已将自己的出生点设置为当前坐标".into(),
         },
         "gamerule" => match args.get(1) {
-            Some(v) => format!("游戏规则 {} 已更新为 {}", args[0], v),
-            None => format!("游戏规则 {} 当前值：默认", args[0]),
+            Some(_) => format!("游戏规则 {} 已更新为 {}", cn[0], cn[1]),
+            None => format!("游戏规则 {} 当前值：默认", cn[0]),
         },
         "kick" => match args.get(1) {
-            Some(r) => format!("已将 {} 踢出服务器：{r}", args[0]),
-            None => format!("已将 {} 踢出服务器", args[0]),
+            Some(r) => format!("已将 {} 踢出服务器，原因：{r}", cn[0]),
+            None => format!("已将 {} 踢出服务器", cn[0]),
         },
         "ban" => match args.get(1) {
-            Some(r) => format!("已封禁 {}：{r}", args[0]),
-            None => format!("已封禁 {}", args[0]),
+            Some(r) => format!("已封禁 {}，原因：{r}", cn[0]),
+            None => format!("已封禁 {}", cn[0]),
         },
-        "op" => format!("已将 {} 提升为服务器管理员", args[0]),
-        "deop" => format!("已撤销 {} 的管理员权限", args[0]),
-        "seed" => "世界种子：-4738250169295530411".into(),
-        "list" => "在线玩家（2/20）：Alex, Steve".into(),
+        "op" => format!("已将 {} 提升为服务器管理员", cn[0]),
+        "deop" => format!("已撤销 {} 的管理员权限", cn[0]),
+        "seed" => "世界种子：-4738250169295530411（模拟）".into(),
+        "list" => "在线玩家（2/20）：Alex、Steve".into(),
         "help" => "可用指令：/gamemode /give /tp /effect /enchant /summon /setblock /fill /clone /kill /clear /time /weather /difficulty /tellraw /title /xp /gamerule /say /execute /scoreboard /data /locate /tag /bossbar /team /playsound /item /worldborder /attribute /damage /ride /help 等，输入 / 可查看全部".into(),
         // ───────────── 必加 ─────────────
-        "msg" | "tell" | "w" => format!("已私聊 {}：{}", args[0], args[1..].join(" ")),
+        "msg" | "tell" | "w" => format!("已向 {} 发送私信：{}", cn[0], args[1..].join(" ")),
         "tag" => match args[1].as_str() {
-            "add" => format!("已为 {} 添加标签 {}", args[0], args[2]),
-            "remove" => format!("已移除 {} 的标签 {}", args[0], args[2]),
-            _ => format!("{} 的标签：{}", args[0], if args.len() > 3 { args[3..].join(", ") } else { "（无）".into() }),
+            "add" => format!("已为 {} 添加标签【{}】", cn[0], args[2]),
+            "remove" => format!("已移除 {} 的标签【{}】", cn[0], args[2]),
+            _ => format!(
+                "{} 身上的标签：{}",
+                cn[0],
+                if args.len() > 3 {
+                    args[3..].join("、")
+                } else {
+                    "（无）".into()
+                }
+            ),
         },
         "data" => match args[0].as_str() {
             "merge" => {
                 if args[1] == "entity" {
-                    format!("已修改 {} 的 NBT 数据 {}", args[2], args[3])
+                    format!("已把 NBT 数据 {} 合并到 {}", args[3], cn[2])
                 } else {
-                    format!("已修改方块 ({}, {}, {}) 的 NBT 数据 {}", args[2], args[3], args[4], args[5])
+                    format!(
+                        "已把 NBT 数据 {} 合并到坐标 ({}, {}, {}) 处的方块",
+                        args[5], args[2], args[3], args[4]
+                    )
                 }
             }
             _ => {
                 if args[1] == "entity" {
-                    format!("{} 的 NBT 数据：{{Health:20f, ...}}（模拟）", args[2])
+                    format!("{} 的 NBT 数据：{{Health:20f, ...}}（模拟）", cn[2])
                 } else {
-                    format!("方块 ({}, {}, {}) 的 NBT 数据：{{Items:[]}}（模拟）", args[2], args[3], args[4])
+                    format!(
+                        "坐标 ({}, {}, {}) 处方块的 NBT 数据：{{Items:[]}}（模拟）",
+                        args[2], args[3], args[4]
+                    )
                 }
             }
         },
         "locate" => {
-            let name = &args[1];
             if args[0] == "structure" {
-                format!("已定位到最近的 {}：X: 128, Y: 70, Z: -256（模拟）", name)
+                format!(
+                    "已定位到最近的【{}】：X: 128, Y: 70, Z: -256（模拟）",
+                    cn[1]
+                )
             } else {
-                format!("最近的 {} 生物群系：X: 64, Y: 70, Z: 192（模拟）", name)
+                format!(
+                    "最近的生物群系【{}】：X: 64, Y: 70, Z: 192（模拟）",
+                    cn[1]
+                )
             }
         }
         "setworldspawn" => {
             if args.len() >= 3 {
-                format!("已将世界出生点设为 ({}, {}, {})", args[0], args[1], args[2])
+                format!("已将世界出生点设置为坐标 ({}, {}, {})", args[0], args[1], args[2])
             } else {
-                "已将世界出生点设为当前位置".into()
+                "已将世界出生点设置为当前位置".into()
             }
         }
         "scoreboard" => {
             if args[0] == "objectives" {
                 match args[1].as_str() {
-                    "add" => format!("已添加记分板目标 {}（判据 {}）", args[2], args[3]),
-                    "remove" => format!("已移除记分板目标 {}", args[2]),
-                    "setdisplay" => match args.get(3) {
-                        Some(n) => format!("已在 {} 槽位显示目标 {}", args[2], n),
-                        None => format!("已清除 {} 槽位的显示", args[2]),
+                    "add" => match args.get(4) {
+                        Some(_) => format!(
+                            "已添加记分板目标【{}】，判据：{}，显示名：{}",
+                            args[2],
+                            cn[3],
+                            args[4..].join(" ")
+                        ),
+                        None => format!("已添加记分板目标【{}】，判据：{}", args[2], cn[3]),
                     },
-                    _ => "记分板目标：kills, deaths, coins（模拟）".into(),
+                    "remove" => format!("已移除记分板目标【{}】", args[2]),
+                    "setdisplay" => match args.get(3) {
+                        Some(_) => format!("已在【{}】槽位显示目标【{}】", cn[2], args[3]),
+                        None => format!("已清除【{}】槽位的显示", cn[2]),
+                    },
+                    "modify" => {
+                        let name = format!("【{}】", args[2]);
+                        match args[3].as_str() {
+                            "displayname" => format!(
+                                "已将记分板目标{name}的显示名改为 {}",
+                                args[4..].join(" ")
+                            ),
+                            "rendertype" => {
+                                format!("已将记分板目标{name}的数字渲染方式改为{}", cn[4])
+                            }
+                            _ => format!(
+                                "已将记分板目标{name}的数字格式改为{}",
+                                cn.get(4).cloned().unwrap_or_default()
+                            ),
+                        }
+                    }
+                    _ => "记分板目标：kills、deaths、coins（模拟）".into(),
                 }
             } else {
                 match args[1].as_str() {
-                    "list" => format!("{} 的记分板：kills=10, coins=128（模拟）", args.get(2).cloned().unwrap_or_else(|| "所有玩家".into())),
-                    "get" => format!("{} 的 {} 分数为 10（模拟）", args[2], args[3]),
-                    "set" => format!("已将 {} 的 {} 分数设为 {}", args[2], args[3], args[4]),
-                    "add" => format!("已将 {} 的 {} 分数增加 {}", args[2], args[3], args[4]),
-                    "remove" => format!("已将 {} 的 {} 分数减少 {}", args[2], args[3], args[4]),
-                    _ => match args.get(3) {
-                        Some(n) => format!("已重置 {} 的 {} 分数", args[2], n),
-                        None => format!("已重置 {} 的所有分数", args[2]),
+                    "list" => match args.get(2) {
+                        Some(_) => format!("{} 的记分板：kills=10、coins=128（模拟）", cn[2]),
+                        None => "所有玩家的记分板：kills=10、coins=128（模拟）".into(),
                     },
+                    "get" => format!("{} 的【{}】分数为 10（模拟）", cn[2], args[3]),
+                    "set" => format!("已将 {} 的【{}】分数设置为 {}", cn[2], args[3], args[4]),
+                    "add" => format!("已将 {} 的【{}】分数增加了 {}", cn[2], args[3], args[4]),
+                    "remove" => format!("已将 {} 的【{}】分数减少了 {}", cn[2], args[3], args[4]),
+                    "reset" => match args.get(3) {
+                        Some(_) => format!("已重置 {} 的【{}】分数", cn[2], args[3]),
+                        None => format!("已重置 {} 的所有分数", cn[2]),
+                    },
+                    "enable" => format!("已启用 {} 的触发器【{}】", cn[2], args[3]),
+                    "operation" => format!(
+                        "已执行运算：{} 的【{}】 {} {} 的【{}】",
+                        cn[2], args[3], args[4], cn[5], args[6]
+                    ),
+                    "display" => {
+                        if args[2] == "name" {
+                            format!(
+                                "已将 {} 的【{}】显示名改为 {}",
+                                cn[3],
+                                args[4],
+                                args[5..].join(" ")
+                            )
+                        } else {
+                            format!(
+                                "已将 {} 的【{}】数字格式改为{}",
+                                cn[3],
+                                args[4],
+                                cn.get(5).cloned().unwrap_or_default()
+                            )
+                        }
+                    }
+                    _ => "已执行记分板指令".into(),
                 }
             }
         }
         // ───────────── 推荐追加 ─────────────
         "bossbar" => {
             if args[0] == "add" {
-                format!("已创建 Boss 血条 {}：{}", args[1], args[2])
+                format!("已创建 Boss 血条【{}】，名称：{}", args[1], args[2])
             } else if args[0] == "remove" {
-                format!("已移除 Boss 血条 {}", args[1])
+                format!("已移除 Boss 血条【{}】", args[1])
             } else if args[0] == "list" {
-                "Boss 血条：custom:hp, custom:energy（模拟）".into()
+                "Boss 血条：custom:hp、custom:energy（模拟）".into()
             } else if args[0] == "get" {
-                format!("Boss 血条 {} 的 {}：5（模拟）", args[1], args.get(2).cloned().unwrap_or_else(|| "value".into()))
+                format!(
+                    "Boss 血条【{}】的 {}：5（模拟）",
+                    args[1],
+                    cn.get(2).cloned().unwrap_or_else(|| "当前值".into())
+                )
             } else {
-                format!("已设置血条 {} 的 {} 为 {}", args[1], args[2], args[3])
+                format!("已将血条【{}】的{}设置为 {}", args[1], cn[2], args[3])
             }
         }
         "team" => match args[0].as_str() {
             "list" => match args.get(1) {
-                Some(t) => format!("队伍 {} 成员：Alex, Steve（模拟）", t),
-                None => "队伍：red, blue, builders（模拟）".into(),
+                Some(_) => format!("队伍【{}】的成员：Alex、Steve（模拟）", args[1]),
+                None => "队伍：red、blue、builders（模拟）".into(),
             },
-            "add" => format!("已创建队伍 {}{}", args[1], args.get(2).map(|d| format!("（{d}）")).unwrap_or_default()),
-            "remove" => format!("已移除队伍 {}", args[1]),
-            "empty" => format!("已清空队伍 {} 的所有成员", args[1]),
-            "join" => format!("已将 {} 加入队伍 {}", args.get(2).cloned().unwrap_or_else(|| "自己".into()), args[1]),
-            "leave" => format!("已将 {} 移出所在队伍", args[1]),
-            _ => format!("已修改队伍 {} 的 {} 为 {}", args[1], args[2], args[3]),
+            "add" => format!(
+                "已创建队伍【{}】{}",
+                args[1],
+                args.get(2).map(|d| format!("，显示名：{d}")).unwrap_or_default()
+            ),
+            "remove" => format!("已移除队伍【{}】", args[1]),
+            "empty" => format!("已清空队伍【{}】的所有成员", args[1]),
+            "join" => format!(
+                "已将 {} 加入队伍【{}】",
+                cn.get(2).cloned().unwrap_or_else(|| "自己".into()),
+                args[1]
+            ),
+            "leave" => format!("已将 {} 移出所在队伍", cn[1]),
+            _ => format!("已将队伍【{}】的 {} 修改为 {}", args[1], cn[2], cn[3]),
         },
         "playsound" => {
-            let mut base = format!("已向 {} 播放音效 {}（来源 {}）", args[2], args[0], args[1]);
+            let mut base = format!("已向 {} 播放音效【{}】，来源：{}", cn[2], cn[0], cn[1]);
             if args.len() >= 7 {
-                base = format!("{base}，音量 {}，音调 {}", args[6], args.get(7).cloned().unwrap_or_else(|| "1".into()));
+                base = format!(
+                    "{base}，音量 {}，音调 {}",
+                    args[6],
+                    args.get(7).cloned().unwrap_or_else(|| "1".into())
+                );
             }
             base
         }
         "stopsound" => match args.get(2) {
-            Some(s) => format!("已停止 {} 的 {} 来源音效 {}", args[0], args[1], s),
+            Some(_) => format!("已停止 {} 的{}来源音效【{}】", cn[0], cn[1], args[2]),
             None => match args.get(1) {
-                Some(src) => format!("已停止 {} 的 {} 来源所有音效", args[0], src),
-                None => format!("已停止 {} 的所有音效", args[0]),
+                Some(_) => format!("已停止 {} 的{}来源全部音效", cn[0], cn[1]),
+                None => format!("已停止 {} 的全部音效", cn[0]),
             },
         },
         "item" => {
             if args[1] == "entity" {
                 let count = args.get(5).cloned().unwrap_or_else(|| "1".into());
-                format!("已将 {} 的 {} 槽位替换为 {} ×{}", args[2], args[3], args[4], count)
+                format!(
+                    "已将 {} 的【{}】槽位替换为【{}】×{count}",
+                    cn[2], args[3], cn[4]
+                )
             } else {
                 let count = args.get(7).cloned().unwrap_or_else(|| "1".into());
-                format!("已将方块 ({}, {}, {}) 的 {} 槽位替换为 {} ×{}", args[2], args[3], args[4], args[5], args[6], count)
+                format!(
+                    "已将坐标 ({}, {}, {}) 处方块的【{}】槽位替换为【{}】×{count}",
+                    args[2], args[3], args[4], args[5], cn[6]
+                )
             }
         }
         "worldborder" => match args[0].as_str() {
-            "get" => "当前世界边界：1000 × 1000，中心 (0, 0)（模拟）".into(),
+            "get" => "当前世界边界：1000 × 1000 格，中心 (0, 0)（模拟）".into(),
             "set" | "add" => match args.get(2) {
-                Some(s) => format!("世界边界将在 {} 秒内调整为 {} 格", s, args[1]),
+                Some(s) => format!("世界边界将在 {s} 秒内调整为 {} 格", args[1]),
                 None => format!("世界边界已调整为 {} 格", args[1]),
             },
-            "center" => format!("世界边界中心已设为 ({}, {})", args[1], args[2]),
-            "damage" => format!("边界伤害 {} 已设为 {}", args[1], args[2]),
-            _ => format!("边界警告 {} 已设为 {}", args[1], args[2]),
+            "center" => format!("世界边界中心已设置为 ({}, {})", args[1], args[2]),
+            _ => format!("边界{} 已设置为 {}", cn[1], args[2]),
         },
         "attribute" => match args[2].as_str() {
-            "get" => format!("{} 的 {}：20.0（模拟）", args[0], args[1]),
+            "get" => format!("{} 的【{}】：20.0（模拟）", cn[0], args[1]),
             "base" => {
                 if args[3] == "get" {
-                    format!("{} 的 {} 基础值：20.0（模拟）", args[0], args[1])
+                    format!("{} 的【{}】基础值为 20.0（模拟）", cn[0], args[1])
                 } else {
-                    format!("已将 {} 的 {} 基础值设为 {}", args[0], args[1], args[4])
+                    format!("已将 {} 的【{}】基础值设置为 {}", cn[0], args[1], args[4])
                 }
             }
             _ => {
                 if args[3] == "add" {
-                    format!("已为 {} 添加属性修饰符 {}（{} {}）", args[0], args[5], args[6], args[7])
+                    format!(
+                        "已为 {} 添加属性修饰符【{}】：{} {}",
+                        cn[0], args[5], cn[6], args[7]
+                    )
                 } else {
-                    format!("已移除 {} 的属性修饰符 {}", args[0], args[5])
+                    format!("已移除 {} 的属性修饰符【{}】", cn[0], args[5])
                 }
             }
         },
@@ -2882,137 +3437,178 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
             }
         }
         "stop" => "服务器正在关闭，所有玩家将被断开连接…".into(),
-        "pardon" | "unban" => format!("已解封 {}", args[0]),
+        "pardon" | "unban" => format!("已解封 {}", cn[0]),
         "banlist" => {
             if args.first().map(|s| s.as_str()) == Some("ips") {
                 "IP 封禁列表：192.168.1.7（模拟）".into()
             } else {
-                "封禁列表（2）：Steve（作弊）, Alex（外挂）（模拟）".into()
+                "封禁列表（2）：Steve（作弊）、Alex（外挂）（模拟）".into()
             }
         }
         // ───────────── 其他 ─────────────
         "clearspawnpoint" => match args.first() {
-            Some(t) => format!("已清除 {} 的出生点", t),
+            Some(_) => format!("已清除 {} 的出生点", cn[0]),
             None => "已清除自己的出生点".into(),
         },
         "damage" => match args.get(2) {
-            Some(t) => format!("已对 {} 造成 {} 点 {} 伤害", args[0], args[1], t),
-            None => format!("已对 {} 造成 {} 点伤害", args[0], args[1]),
+            Some(_) => format!("已对 {} 造成 {} 点{}伤害", cn[0], args[1], cn[2]),
+            None => format!("已对 {} 造成 {} 点伤害", cn[0], args[1]),
         },
         "ride" => {
             if args[1] == "mount" {
-                format!("已让 {} 骑上 {}", args[0], args[2])
+                format!("已让 {} 骑上【{}】", cn[0], cn[2])
             } else {
-                format!("已让 {} 下车", args[0])
+                format!("已让 {} 从坐骑上下来", cn[0])
             }
         }
         "spectate" => match args.first() {
-            Some(e) => format!("已开始旁观 {}", e),
+            Some(_) => format!("已开始旁观【{}】", cn[0]),
             None => "已停止旁观".into(),
         },
         // ───────────── 第二批 ─────────────
         "advancement" => {
             let verb = if args[0] == "grant" { "授予" } else { "撤销" };
             if args.get(2).map(|s| s.as_str()) == Some("only") {
-                format!("已{verb} {} 的进度 {}", args[1], args[3])
+                format!("已{verb} {} 的进度【{}】", cn[1], cn[3])
             } else {
-                format!("已{verb} {} 的全部进度", args[1])
+                format!("已{verb} {} 的全部进度", cn[1])
             }
         }
         "defaultgamemode" => {
-            let zh = match args[0].as_str() {
-                "survival" => "生存",
-                "creative" => "创造",
-                "adventure" => "冒险",
-                _ => "旁观",
+            let label = match args[0].as_str() {
+                "survival" => "生存模式",
+                "creative" => "创造模式",
+                "adventure" => "冒险模式",
+                _ => "旁观模式",
             };
-            format!("默认游戏模式已设为 {}（{zh}）", args[0])
+            format!("默认游戏模式已设置为{label}")
         }
-        "function" => format!("已执行函数 {}（模拟）", args[0]),
+        "function" => format!("已执行数据包函数【{}】（模拟）", args[0]),
         "loot" => {
             if args[0] == "give" {
-                format!("已将 {} 的战利品给予 {}", args[2], args[1])
+                format!("已将战利品表【{}】的产出给予 {}", args[2], cn[1])
             } else if args[0] == "spawn" {
-                format!("已在 ({}, {}, {}) 生成 {} 的战利品", args[1], args[2], args[3], args[4])
+                format!(
+                    "已在坐标 ({}, {}, {}) 生成战利品表【{}】的产出",
+                    args[1], args[2], args[3], args[4]
+                )
             } else if args[1] == "entity" {
-                format!("已将 {} 的 {} 槽位替换为 {} 的战利品", args[2], args[3], args[4])
+                format!(
+                    "已将 {} 的【{}】槽位替换为战利品表【{}】的产出",
+                    cn[2], args[3], args[4]
+                )
             } else {
-                format!("已将方块 ({}, {}, {}) 的 {} 槽位替换为 {} 的战利品", args[2], args[3], args[4], args[5], args[6])
+                format!(
+                    "已将坐标 ({}, {}, {}) 处方块的【{}】槽位替换为战利品表【{}】的产出",
+                    args[2], args[3], args[4], args[5], args[6]
+                )
             }
         }
         "particle" => {
-            if args.len() <= 2 {
-                format!("已在 {} 位置生成粒子 {}", args[1], args[0])
-            } else {
-                format!(
-                    "已在 ({}, {}, {}) 生成 {} 个 {} 粒子（扩散 {} {} {}，速度 {}）",
-                    args[1], args[2], args[3], args[args.len() - 2], args[0], args[4], args[5], args[6], args[7]
-                )
+            // 三种写法：<粒子> <目标> / <粒子> <坐标> / <粒子> <坐标> <扩散> <速度> <数量>
+            match args.len() {
+                2 => format!("已在 {} 的位置生成【{}】粒子", cn[1], cn[0]),
+                4 => format!(
+                    "已在坐标 ({}, {}, {}) 生成【{}】粒子",
+                    args[1], args[2], args[3], cn[0]
+                ),
+                _ => format!(
+                    "已在坐标 ({}, {}, {}) 生成 {} 个【{}】粒子，扩散 ({}, {}, {})，速度 {}",
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[args.len() - 2],
+                    cn[0],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7]
+                ),
             }
         }
         "place" => {
             if args[0] == "feature" {
                 if args.len() >= 5 {
-                    format!("已在 ({}, {}, {}) 放置地物 {}", args[2], args[3], args[4], args[1])
+                    format!(
+                        "已在坐标 ({}, {}, {}) 放置【{}】地物",
+                        args[2], args[3], args[4], cn[1]
+                    )
                 } else {
-                    format!("已在当前位置放置地物 {}", args[1])
+                    format!("已在当前位置放置【{}】地物", cn[1])
                 }
             } else if args[0] == "structure" {
-                format!("已在 ({}, {}, {}) 放置结构 {}", args[2], args[3], args[4], args[1])
+                format!(
+                    "已在坐标 ({}, {}, {}) 放置【{}】结构",
+                    args[2], args[3], args[4], cn[1]
+                )
             } else {
-                format!("已在 ({}, {}, {}) 放置拼图池 {}", args[5], args[6], args[7], args[1])
+                format!(
+                    "已在坐标 ({}, {}, {}) 放置拼图池【{}】",
+                    args[5], args[6], args[7], args[1]
+                )
             }
         }
         "recipe" => {
             if args[0] == "give" {
-                format!("已向 {} 解锁配方 {}", args[1], args[2])
+                format!("已为 {} 解锁配方【{}】", cn[1], args[2])
             } else {
-                format!("已从 {} 移除配方 {}", args[1], args[2])
+                format!("已从 {} 处移除配方【{}】", cn[1], args[2])
             }
         }
-        "reload" => "已重新加载所有数据包（模拟）".into(),
+        "reload" => "已重新加载全部数据包（模拟）".into(),
         "schedule" => {
             if args[0] == "clear" {
-                format!("已清除 {} 的定时执行计划", args[1])
+                format!("已清除函数【{}】的定时执行计划", args[1])
             } else {
                 let delay: i64 = args[2].parse().unwrap_or(0);
-                format!("已安排在 {} tick 后执行函数 {}", delay, args[1])
+                format!("已安排在 {delay} tick 后执行函数【{}】", args[1])
             }
         }
         "spreadplayers" => format!(
-            "已将 {} 分散到 ({}, {}) 附近，间距 {}，最大半径 {}",
-            args[5], args[0], args[1], args[2], args[3]
+            "已将 {} 随机分散到 ({}, {}) 附近，间距 {}，最大半径 {}",
+            cn[5], args[0], args[1], args[2], args[3]
         ),
         "teammsg" | "tm" => format!("[队伍] {}", args.join(" ")),
         "tick" => match args[0].as_str() {
             "query" => "当前 tick：1200，速率 20.0/s（模拟）".into(),
-            "rate" => format!("已将服务器速率设为 {} tick/s", args[1]),
+            "rate" => format!("已将服务器速率调整为 {} tick/s", args[1]),
             "sprint" => format!("已进入冲刺模式，将在 {} tick 内全速运行", args[1]),
             "step" => match args.get(1) {
-                Some(t) => format!("已步进 {} tick", t),
+                Some(t) => format!("已步进 {t} tick"),
                 None => "已步进 1 tick".into(),
             },
             "freeze" => "服务器 tick 已冻结".into(),
             _ => "服务器 tick 已恢复运行".into(),
         },
         "trigger" => match args.get(2) {
-            Some(v) => format!("触发器 {} 已{} {}", args[0], if args[1] == "add" { "增加" } else { "设为" }, v),
-            None => format!("触发器 {} 已触发", args[0]),
+            Some(_) => format!(
+                "触发器【{}】已{} {}",
+                args[0],
+                if args[1] == "add" { "增加" } else { "设置为" },
+                args[2]
+            ),
+            None => format!("触发器【{}】已触发", args[0]),
         },
         "version" => "服务器版本：Minecraft 26.3（模拟）".into(),
         "forceload" => match args[0].as_str() {
             "add" => {
                 if args.len() >= 5 {
-                    format!("已强制加载区块 ({}, {}) 至 ({}, {})", args[1], args[2], args[3], args[4])
+                    format!(
+                        "已强制加载区块 ({}, {}) 到 ({}, {})",
+                        args[1], args[2], args[3], args[4]
+                    )
                 } else {
                     format!("已强制加载区块 ({}, {})", args[1], args[2])
                 }
             }
             "remove" => {
                 if args.get(1).map(|s| s.as_str()) == Some("all") {
-                    "已取消全部强制加载区块".into()
+                    "已取消全部强制加载的区块".into()
                 } else if args.len() >= 5 {
-                    format!("已取消强制加载区块 ({}, {}) 至 ({}, {})", args[1], args[2], args[3], args[4])
+                    format!(
+                        "已取消强制加载区块 ({}, {}) 到 ({}, {})",
+                        args[1], args[2], args[3], args[4]
+                    )
                 } else {
                     format!("已取消强制加载区块 ({}, {})", args[1], args[2])
                 }
@@ -3022,86 +3618,92 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
                 None => "强制加载区块数：4（模拟）".into(),
             },
         },
-        "fillbiome" => format!("已将区域 ({}, {}) 至 ({}, {}) 的生物群系填充为 {}", args[0], args[1], args[2], args[3], args[4]),
+        "fillbiome" => format!(
+            "已将区域 ({}, {}) 到 ({}, {}) 的生物群系填充为【{}】",
+            args[0], args[1], args[2], args[3], cn[4]
+        ),
         "random" => match args[0].as_str() {
-            "reset" => format!("已重置随机序列 {}", args[1]),
+            "reset" => format!("已重置随机序列【{}】", args[1]),
             _ => format!("随机数（范围 {}）：7（模拟）", args[1]),
         },
         "return" => format!("函数返回值：{}", args[0]),
         "rotate" => match args.get(3) {
-            Some(d) => format!("已在 {} tick 内将 {} 旋转到 ({}, {})", d, args[0], args[1], args[2]),
-            None => format!("已将 {} 旋转到 ({}, {})", args[0], args[1], args[2]),
+            Some(d) => format!(
+                "已在 {d} tick 内将 {} 旋转到偏航角 {}、俯仰角 {}",
+                cn[0], args[1], args[2]
+            ),
+            None => format!("已将 {} 旋转到偏航角 {}、俯仰角 {}", cn[0], args[1], args[2]),
         },
         "waypoint" => {
             if args[0] == "list" {
-                "路点：home (0, 64, 0), base (128, 70, -64)（模拟）".into()
+                "路点：home (0, 64, 0)、base (128, 70, -64)（模拟）".into()
             } else {
-                format!("已修改路点 {} 的 {} 为 {}", args[1], args[2], args[3])
+                format!("已修改路点【{}】的{}为 {}", args[1], cn[2], args[3])
             }
         }
         "stopwatch" => match args[0].as_str() {
-            "create" => format!("已创建计时器 {}", args[1]),
-            "start" => format!("计时器 {} 已开始计时", args[1]),
-            "stop" => format!("计时器 {} 已停止：3.52 秒（模拟）", args[1]),
-            "query" => format!("计时器 {}：1.20 秒（模拟）", args[1]),
-            _ => "计时器：run1, parkour（模拟）".into(),
+            "create" => format!("已创建计时器【{}】", args[1]),
+            "start" => format!("计时器【{}】已开始计时", args[1]),
+            "stop" => format!("计时器【{}】已停止：3.52 秒（模拟）", args[1]),
+            "query" => format!("计时器【{}】：1.20 秒（模拟）", args[1]),
+            _ => "计时器：run1、parkour（模拟）".into(),
         },
         "datapack" => match args[0].as_str() {
-            "enable" => format!("已启用数据包 {}", args[1]),
-            "disable" => format!("已禁用数据包 {}", args[1]),
-            _ => "可用数据包：vanilla, file/my_pack（模拟）".into(),
+            "enable" => format!("已启用数据包【{}】", args[1]),
+            "disable" => format!("已禁用数据包【{}】", args[1]),
+            _ => "可用数据包：vanilla、file/my_pack（模拟）".into(),
         },
         "dialog" => {
             if args[0] == "show" {
-                format!("已向 {} 显示对话框 {}", args[1], args[2])
+                format!("已向 {} 显示对话框【{}】", cn[1], args[2])
             } else {
-                format!("已清除 {} 的对话框", args[1])
+                format!("已清除 {} 的对话框", cn[1])
             }
         }
         "swing" => match args.get(1) {
-            Some(h) => format!("{} 已挥动 {}", args.get(0).cloned().unwrap_or_else(|| "执行者".into()), h),
+            Some(_) => format!("{} 挥动了{}", cn[0], cn[1]),
             None => match args.first() {
-                Some(t) => format!("{} 已挥动主手", t),
-                None => "执行者已挥动主手".into(),
+                Some(_) => format!("{} 挥动了主手", cn[0]),
+                None => "指令执行者挥动了主手".into(),
             },
         },
-        "fetchprofile" => format!("已获取 {} 的玩家档案（模拟）", args[0]),
+        "fetchprofile" => format!("已获取 {} 的玩家档案（模拟）", cn[0]),
         "posteffect" => {
             if args[0] == "clear" {
                 "已清除屏幕后处理效果".into()
             } else {
-                format!("已应用后处理效果 {}", args[0])
+                format!("已应用后处理效果【{}】", args[0])
             }
         }
         "whitelist" => match args[0].as_str() {
             "on" => "白名单已启用".into(),
             "off" => "白名单已关闭".into(),
-            "add" => format!("已将 {} 加入白名单", args[1]),
-            "remove" => format!("已将 {} 移出白名单", args[1]),
+            "add" => format!("已将 {} 加入白名单", cn[1]),
+            "remove" => format!("已将 {} 移出白名单", cn[1]),
             "reload" => "白名单已重新加载".into(),
-            _ => "白名单（2）：Alex, Steve（模拟）".into(),
+            _ => "白名单（2）：Alex、Steve（模拟）".into(),
         },
         "ban-ip" => match args.get(1) {
-            Some(r) => format!("已封禁 IP {}：{r}", args[0]),
+            Some(r) => format!("已封禁 IP {}，原因：{r}", args[0]),
             None => format!("已封禁 IP {}", args[0]),
         },
         "pardon-ip" => format!("已解封 IP {}", args[0]),
-        "setidletimeout" => format!("挂机踢出时间已设为 {} 分钟", args[0]),
+        "setidletimeout" => format!("挂机踢出时间已设置为 {} 分钟", args[0]),
         "save-off" => "已关闭自动保存".into(),
         "save-on" => "已启用自动保存".into(),
         "publish" => match args.first() {
-            Some(p) => format!("世界已在端口 {p} 向局域网开放（模拟）"),
+            Some(p) => format!("世界已在端口 {p} 上向局域网开放（模拟）"),
             None => "世界已向局域网开放（模拟）".into(),
         },
         "unpublish" => "已关闭局域网开放".into(),
         "transfer" => match args.get(1) {
-            Some(p) => format!("已将玩家转移到 {}:{}（模拟）", args[0], p),
+            Some(p) => format!("已将玩家转移到 {} 的 {p} 端口（模拟）", args[0]),
             None => format!("已将玩家转移到 {}（模拟）", args[0]),
         },
         "perf" => match args[0].as_str() {
             "start" => "已开始性能记录".into(),
             "stop" => "已停止性能记录并生成报告".into(),
-            _ => "已清除性能记录缓存".into(),
+            _ => "已清空性能记录缓存".into(),
         },
         "debug" => match args[0].as_str() {
             "start" => "已开始调试采样".into(),
@@ -3110,19 +3712,19 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
         },
         "jfr" => {
             if args[0] == "start" {
-                "已开始 JFR 记录".into()
+                "已开始 JFR 性能记录".into()
             } else {
-                "已停止 JFR 记录".into()
+                "已停止 JFR 性能记录".into()
             }
         }
         "serverpack" => "服务器资源包已生成（模拟）".into(),
-        "debugconfig" => format!("调试配置 {}：当前值 true（模拟）", args[args.len() - 1]),
+        "debugconfig" => format!("调试配置【{}】：当前值 true（模拟）", args[args.len() - 1]),
         "debugpath" => match args.first() {
-            Some(a) => format!("寻路渲染：已{}", if a == "stop" { "停止" } else { "开始" }),
-            None => "已切换寻路渲染（模拟）".into(),
+            Some(a) => format!("寻路路径渲染：已{}", if a == "stop" { "停止" } else { "开始" }),
+            None => "已切换寻路路径渲染（模拟）".into(),
         },
         "debugmobspawning" => match args.get(1) {
-            Some(c) => format!("生物生成冷却已设为 {}", c),
+            Some(c) => format!("生物生成冷却已设置为 {c} tick"),
             None => match args.first() {
                 Some(_) => "生物生成数据已重置".into(),
                 None => "生物生成调试信息已输出（模拟）".into(),
@@ -3132,23 +3734,23 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
             if args[0] == "reset" {
                 "监守者生成追踪已重置".into()
             } else {
-                format!("监守者生成追踪值已设为 {}", args[1])
+                format!("监守者生成追踪值已设置为 {}", args[1])
             }
         }
         "spawn_armor_trims" => "已生成全部盔甲纹饰（模拟）".into(),
         "raid" => {
             if args[0] == "stop" {
-                format!("已停止 {} 附近的袭击", args[1])
+                format!("已停止 {} 附近的袭击", cn[1])
             } else {
-                format!("{} 附近的袭击：波次 2（模拟）", args[1])
+                format!("{} 附近的袭击：当前为第 2 波（模拟）", cn[1])
             }
         }
-        "chase" => format!("已开始追踪指令 {}（开发版）", args[0]),
+        "chase" => format!("已开始追踪指令【{}】（开发版）", args[0]),
         "test" => match args[0].as_str() {
             "runall" => "已运行全部游戏测试（模拟）".into(),
             "resetall" => "已重置全部测试结构".into(),
             "clearall" => "已清除全部测试结构".into(),
-            _ => format!("已运行测试 {}", args[1]),
+            _ => format!("已运行测试【{}】", args[1]),
         },
         _ => "指令已执行".into(),
     }
@@ -3166,39 +3768,40 @@ fn execute_execute(args: &[String]) -> ExecutionResult {
         return ExecutionResult { success: false, message: "缺少 run 后的子指令".into() };
     }
 
-    // 组装上下文描述
+    // 组装上下文描述（选择器等参数同样翻成中文）
+    let arg_cn = |k: usize| reg::localize(args.get(k).map(|s| s.as_str()).unwrap_or(""));
     let mut clauses: Vec<String> = Vec::new();
     let mut i = 0;
     while i < run_idx {
         match args[i].as_str() {
             "as" => {
-                clauses.push(format!("以 {} 的身份", args.get(i + 1).cloned().unwrap_or_default()));
+                clauses.push(format!("以 {} 的身份", arg_cn(i + 1)));
                 i += 2;
             }
             "at" => {
-                clauses.push(format!("在 {} 的位置", args.get(i + 1).cloned().unwrap_or_default()));
+                clauses.push(format!("在 {} 的位置", arg_cn(i + 1)));
                 i += 2;
             }
             "positioned" => {
                 clauses.push(format!(
                     "在坐标 ({}, {}, {})",
-                    args.get(i + 1).cloned().unwrap_or_default(),
-                    args.get(i + 2).cloned().unwrap_or_default(),
-                    args.get(i + 3).cloned().unwrap_or_default()
+                    arg_cn(i + 1),
+                    arg_cn(i + 2),
+                    arg_cn(i + 3)
                 ));
                 i += 4;
             }
             "if" => {
                 if args.get(i + 1).map(|s| s.as_str()) == Some("entity") {
-                    clauses.push(format!("当 {} 存在时", args.get(i + 2).cloned().unwrap_or_default()));
+                    clauses.push(format!("当 {} 存在时", arg_cn(i + 2)));
                     i += 3;
                 } else {
                     clauses.push(format!(
-                        "当 ({}, {}, {}) 为 {} 时",
-                        args.get(i + 2).cloned().unwrap_or_default(),
-                        args.get(i + 3).cloned().unwrap_or_default(),
-                        args.get(i + 4).cloned().unwrap_or_default(),
-                        args.get(i + 5).cloned().unwrap_or_default()
+                        "当 ({}, {}, {}) 处为【{}】时",
+                        arg_cn(i + 2),
+                        arg_cn(i + 3),
+                        arg_cn(i + 4),
+                        arg_cn(i + 5)
                     ));
                     i += 6;
                 }
@@ -3405,7 +4008,11 @@ mod tests {
     fn execute_command_runs_inner() {
         let r = execute("/execute as @a run give @a diamond 1".into());
         assert!(r.success, "message = {}", r.message);
-        assert!(r.message.contains("@a") && r.message.contains("diamond"));
+        assert!(
+            r.message.contains("所有玩家") && r.message.contains("钻石"),
+            "message = {}",
+            r.message
+        );
     }
 
     #[test]
@@ -3656,5 +4263,515 @@ mod tests {
     fn command_count_matches_expectation() {
         // 覆盖 Vanilla Commands.java 的主要注册项
         assert!(list_commands().len() >= 90, "count = {}", list_commands().len());
+    }
+
+    // ───────────── 物品组件 / 旧式 NBT ─────────────
+
+    fn assert_all_succeed(cmds: &[&str]) {
+        for cmd in cmds {
+            let r = execute(cmd.to_string());
+            assert!(r.success, "{cmd} 失败：{}", r.message);
+        }
+    }
+
+    #[test]
+    fn give_with_components() {
+        assert_all_succeed(&[
+            "/give @a diamond_sword[minecraft:enchantments={levels:{\"minecraft:sharpness\":5}}]",
+            "/give @a diamond_sword[minecraft:custom_name=\"Excalibur\"] 1",
+            "/give @a diamond[minecraft:unbreakable={}] 64",
+            "/give @a golden_apple[minecraft:food={nutrition:4,saturation:9.6}]",
+            "/give @a white_wool 16",
+            "/give @a netherite_pickaxe 1",
+            "/give @a music_disc_pigstep",
+            "/give @a cherry_planks[minecraft:custom_model_data=7]",
+            "/give @a pig_spawn_egg 3",
+        ]);
+    }
+
+    #[test]
+    fn give_with_legacy_nbt() {
+        assert_all_succeed(&[
+            "/give @a diamond_sword{Enchantments:[{id:\"minecraft:sharpness\",lvl:5}]}",
+            "/give @a stick{CustomModelData:1} 3",
+            "/give @a stone{HideFlags:1}",
+        ]);
+    }
+
+    #[test]
+    fn give_component_with_spaces_inside() {
+        // 组件里的空格不应把 token 拆成多个参数
+        let r =
+            execute("/give @a diamond_sword[minecraft:custom_name=\"Very Cool Sword\"]".into());
+        assert!(r.success, "message = {}", r.message);
+        assert!(r.message.contains("自定义名称"), "message = {}", r.message);
+    }
+
+    #[test]
+    fn give_reports_component_summary() {
+        let r = execute(
+            "/give @a diamond_sword[minecraft:enchantments={levels:{}},minecraft:unbreakable={}]"
+                .into(),
+        );
+        assert!(r.success, "message = {}", r.message);
+        assert!(r.message.contains("附魔"), "message = {}", r.message);
+        assert!(r.message.contains("无法破坏"), "message = {}", r.message);
+    }
+
+    #[test]
+    fn give_with_broken_data_fails() {
+        for cmd in [
+            "/give @a diamond_sword[minecraft:damage=5",
+            "/give @a diamond_sword{Enchantments:[}]",
+            "/give @a not_an_item[minecraft:damage=1]",
+        ] {
+            let r = execute(cmd.to_string());
+            assert!(!r.success, "{cmd} 本应失败，却通过了：{}", r.message);
+        }
+    }
+
+    #[test]
+    fn component_suggestions_after_bracket() {
+        // 敲到命名空间之后，按组件名本身过滤
+        let input = "/give @a diamond_sword[minecraft:ench";
+        let r = analyze(input.into(), chars_at_end(input));
+        assert!(
+            r.suggestions
+                .iter()
+                .any(|s| s.insert.contains("minecraft:enchantments")),
+            "suggestions = {:?}",
+            r.suggestions
+                .iter()
+                .map(|s| s.insert.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // 逗号之后接着补下一个组件，并保留已经写完的部分
+        let input2 = "/give @a diamond_sword[minecraft:damage=1,minecraft:unb";
+        let r2 = analyze(input2.into(), chars_at_end(input2));
+        assert!(
+            r2.suggestions
+                .iter()
+                .any(|s| s.insert.contains(",minecraft:unbreakable")),
+            "suggestions = {:?}",
+            r2.suggestions
+                .iter()
+                .map(|s| s.insert.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn legacy_nbt_key_suggestions() {
+        let input = "/give @a diamond_sword{Ench";
+        let r = analyze(input.into(), chars_at_end(input));
+        assert!(
+            r.suggestions
+                .iter()
+                .any(|s| s.insert.contains("Enchantments")),
+            "suggestions = {:?}",
+            r.suggestions
+                .iter()
+                .map(|s| s.insert.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn item_registry_covers_common_ids() {
+        for id in [
+            "diamond_sword",
+            "netherite_chestplate",
+            "light_blue_wool",
+            "oak_planks",
+            "pig_spawn_egg",
+            "cherry_door",
+            "bamboo_mosaic",
+            "music_disc_pigstep",
+            "spyglass",
+            "tuff_brick_wall",
+        ] {
+            let r = execute(format!("/give @a {id}"));
+            assert!(r.success, "{id} 不在物品表里：{}", r.message);
+        }
+    }
+
+    #[test]
+    fn item_registry_is_generated() {
+        // 染色 / 材质 / 刷怪蛋的展开应当产出足够多的条目
+        assert!(reg::items().len() > 800, "items = {}", reg::items().len());
+        assert!(reg::blocks().len() > 400, "blocks = {}", reg::blocks().len());
+    }
+
+    // ───────────── NBT 与附加数据 ─────────────
+
+    #[test]
+    fn summon_accepts_nbt() {
+        assert_all_succeed(&[
+            "/summon zombie ~ ~ ~ {IsBaby:1b}",
+            "/summon armor_stand 10 64 -20 {ShowArms:1b,NoGravity:1b}",
+            "/summon creeper 1 2 3 {powered:1b}",
+            "/summon item ~ ~1 ~ {Item:{id:\"minecraft:diamond\",Count:1b}}",
+        ]);
+    }
+
+    #[test]
+    fn summon_reports_nbt_summary() {
+        let r = execute("/summon zombie ~ ~ ~ {IsBaby:1b,NoGravity:1b}".into());
+        assert!(r.success, "message = {}", r.message);
+        assert!(r.message.contains("僵尸"), "message = {}", r.message);
+        assert!(r.message.contains("幼年"), "message = {}", r.message);
+    }
+
+    #[test]
+    fn blocks_accept_states_and_nbt() {
+        assert_all_succeed(&[
+            "/setblock 1 2 3 oak_stairs[facing=north,half=bottom]",
+            "/setblock ~ ~ ~ chest{Items:[]}",
+            "/fill 0 0 0 2 2 2 oak_slab[type=top] hollow",
+            "/execute if block 1 2 3 oak_stairs[facing=north] run say ok",
+            "/item replace entity @a weapon.mainhand diamond_sword[minecraft:unbreakable={}]",
+            "/data merge entity @a {Health:20f}",
+            "/data merge block 1 2 3 {Items:[]}",
+        ]);
+    }
+
+    #[test]
+    fn bad_nbt_is_rejected() {
+        for cmd in [
+            "/summon zombie ~ ~ ~ IsBaby:1b",
+            "/summon zombie ~ ~ ~ {IsBaby:1b",
+            "/setblock 1 2 3 oak_stairs[facing=north",
+            "/data merge entity @a Health:20f",
+        ] {
+            let r = execute(cmd.to_string());
+            assert!(!r.success, "{cmd} 本应失败，却通过了：{}", r.message);
+        }
+    }
+
+    #[test]
+    fn nbt_key_suggestions() {
+        // summon 里输入 `{Is` 应当补出实体 NBT 键
+        let input = "/summon zombie {Is";
+        let r = analyze(input.into(), chars_at_end(input));
+        assert!(
+            r.suggestions
+                .iter()
+                .any(|s| s.insert.contains("IsBaby")),
+            "suggestions = {:?}",
+            r.suggestions
+                .iter()
+                .map(|s| s.insert.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // 还没写 `{` 时给出骨架
+        let input2 = "/summon zombie ";
+        let r2 = analyze(input2.into(), chars_at_end(input2));
+        assert!(r2.suggestions.iter().any(|s| s.insert == "{"));
+
+        // 方块参数写 `{` 时同样补 NBT 键
+        let input3 = "/setblock 1 2 3 chest{It";
+        let r3 = analyze(input3.into(), chars_at_end(input3));
+        assert!(
+            r3.suggestions.iter().any(|s| s.insert.contains("Items")),
+            "suggestions = {:?}",
+            r3.suggestions
+                .iter()
+                .map(|s| s.insert.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ───────────── 中文反馈 ─────────────
+
+    #[test]
+    fn execute_messages_are_localized() {
+        for (cmd, expect) in [
+            ("/give @a diamond_sword 64", "钻石剑"),
+            ("/give @a light_blue_wool", "淡蓝色羊毛"),
+            ("/give @a pig_spawn_egg", "猪刷怪蛋"),
+            ("/summon zombie", "僵尸"),
+            ("/setblock 1 2 3 stone", "石头"),
+            ("/effect give @a speed 30", "迅捷"),
+            ("/enchant @a sharpness 5", "锋利"),
+            ("/gamemode creative @a", "创造模式"),
+            ("/weather rain", "雨天"),
+            ("/tp @p", "最近的玩家"),
+            ("/kill @e", "所有实体"),
+            ("/difficulty hard", "困难"),
+            ("/time set day", "白天"),
+            ("/damage @a 5 fall", "摔落"),
+            ("/fill 0 0 0 3 3 3 white_wool", "白色羊毛"),
+            ("/particle flame 1 2 3", "火焰"),
+        ] {
+            let r = execute(cmd.to_string());
+            assert!(r.success, "{cmd} 执行失败：{}", r.message);
+            assert!(
+                r.message.contains(expect),
+                "{cmd} 的输出「{}」里没有「{expect}」",
+                r.message
+            );
+        }
+    }
+
+    #[test]
+    fn raw_ids_do_not_leak_into_messages() {
+        // 常见 ID 不该以原始英文形式出现在反馈里
+        for cmd in [
+            "/give @a diamond_pickaxe",
+            "/give @a oak_planks 3",
+            "/summon creeper",
+            "/setblock 0 0 0 netherrack",
+            "/effect give @a regeneration 10",
+        ] {
+            let r = execute(cmd.to_string());
+            assert!(r.success, "{cmd} 执行失败：{}", r.message);
+            for raw in [
+                "diamond_pickaxe",
+                "oak_planks",
+                "creeper",
+                "netherrack",
+                "regeneration",
+            ] {
+                assert!(
+                    !r.message.contains(raw),
+                    "{cmd} 的输出里仍出现原始 ID「{raw}」：{}",
+                    r.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn common_commands_read_as_chinese() {
+        for cmd in [
+            "/give @a diamond_sword[minecraft:enchantments={levels:{}}] 64",
+            "/give @p light_blue_wool 16",
+            "/setblock 1 2 3 netherrack",
+            "/summon zombie 10 64 -5",
+            "/effect give @p regeneration 30 1",
+            "/tp @e[type=zombie] 100 64 -200",
+            "/tp @a @s",
+            "/tp 1 2 3",
+            "/fill 0 0 0 3 3 3 white_wool hollow",
+            "/clone 0 0 0 2 2 2 10 10 10 force",
+            "/playsound entity.player.levelup master @a",
+            "/damage @e 5 fall",
+            "/execute as @a at @s run give @s diamond 1",
+            "/time set midnight",
+            "/weather thunder",
+            "/xp add @p 30 levels",
+        ] {
+            let r = execute(cmd.to_string());
+            assert!(r.success, "{cmd} 执行失败：{}", r.message);
+            // 输出里不该再出现原始的英文 ID 或选择器
+            for raw in [
+                "diamond_sword",
+                "light_blue_wool",
+                "netherrack",
+                "zombie",
+                "regeneration",
+                "white_wool",
+                "entity.player.levelup",
+                "@a",
+                "@s",
+                "@e",
+                "@p",
+            ] {
+                assert!(
+                    !r.message.contains(raw),
+                    "{cmd} 的输出里仍有英文「{raw}」：{}",
+                    r.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn suggestion_details_use_own_chinese_name() {
+        fn detail_of(input: &str, insert: &str) -> String {
+            let r = analyze(input.into(), chars_at_end(input));
+            r.suggestions
+                .iter()
+                .find(|s| s.insert == insert)
+                .unwrap_or_else(|| panic!("{input} 应当补全 {insert}"))
+                .detail
+                .clone()
+        }
+
+        // 附魔：每条显示自己的中文名，而不是整列重复同一句类型说明
+        assert_eq!(detail_of("/enchant @a aqua", "aqua_affinity"), "水下速掘");
+        assert_eq!(detail_of("/enchant @a sharp", "sharpness"), "锋利");
+        // 物品 / 实体 / 效果
+        assert_eq!(detail_of("/give @a diamond_sw", "diamond_sword"), "钻石剑");
+        assert_eq!(detail_of("/summon zom", "zombie"), "僵尸");
+        assert_eq!(
+            detail_of("/effect give @a regen", "regeneration"),
+            "生命恢复"
+        );
+        // 含 `.` 的整条匹配
+        assert_eq!(
+            detail_of("/attribute @a generic.max_h", "generic.max_health"),
+            "最大生命值"
+        );
+        // 音效来源的 block 要说"方块音效"，而不是物品语境里的"块"
+        assert_eq!(
+            detail_of("/playsound entity.player.levelup ", "block"),
+            "方块音效"
+        );
+
+        // 整列都该是各自的中文名，不该有任何一条落回通用说明
+        let list = analyze("/enchant @a ".into(), chars_at_end("/enchant @a "));
+        let fallback = describe(ArgType::Enchant);
+        let still_generic: Vec<&String> = list
+            .suggestions
+            .iter()
+            .filter(|s| s.detail == fallback)
+            .map(|s| &s.label)
+            .collect();
+        assert!(
+            still_generic.is_empty(),
+            "这些候选仍是通用说明：{still_generic:?}"
+        );
+    }
+
+    #[test]
+    fn all_candidates_are_listed() {
+        // 附魔一共有多少就该列出多少（原先被硬截断到 12 条）
+        let r = analyze("/enchant @a ".into(), chars_at_end("/enchant @a "));
+        assert_eq!(
+            r.suggestions.len(),
+            reg::ENCHANTS.len(),
+            "附魔候选应当全部列出"
+        );
+
+        // 物品候选同样不该被限制
+        let r2 = analyze("/give @a ".into(), chars_at_end("/give @a "));
+        assert!(
+            r2.suggestions.len() > 500,
+            "物品候选应当全部列出，实际只有 {}",
+            r2.suggestions.len()
+        );
+        assert!(
+            r2.suggestions.iter().all(|s| !s.detail.is_empty()),
+            "每条候选都该有自己的说明"
+        );
+    }
+
+    #[test]
+    fn substring_search_works() {
+        // 中间字符也能搜到：`eep` → creeper / sheep
+        let input = "/summon eep";
+        let r = analyze(input.into(), chars_at_end(input));
+        let labels: Vec<&str> = r.suggestions.iter().map(|s| s.insert.as_str()).collect();
+        assert!(labels.contains(&"creeper"), "suggestions = {labels:?}");
+        assert!(labels.contains(&"sheep"), "suggestions = {labels:?}");
+
+        // camelCase 的键名大小写不敏感
+        let input2 = "/summon zombie {baby";
+        let r2 = analyze(input2.into(), chars_at_end(input2));
+        assert!(
+            r2.suggestions.iter().any(|s| s.insert.contains("IsBaby")),
+            "suggestions = {:?}",
+            r2.suggestions
+                .iter()
+                .map(|s| s.insert.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn prefix_beats_substring() {
+        // 完全匹配 > 前缀 > 词首 > 子串
+        let input = "/give @a glass";
+        let r = analyze(input.into(), chars_at_end(input));
+        let labels: Vec<&str> = r.suggestions.iter().map(|s| s.insert.as_str()).collect();
+
+        assert_eq!(labels.first(), Some(&"glass"), "完全匹配应当最前");
+        let pane = labels.iter().position(|l| *l == "glass_pane").unwrap();
+        // `white_stained_glass` 里的 glass 落在词首（`_glass`），属于次优
+        let stained = labels
+            .iter()
+            .position(|l| *l == "white_stained_glass")
+            .unwrap();
+        assert!(
+            pane < stained,
+            "前缀命中应排在词首命中之前：{labels:?}"
+        );
+
+        // 子串命中排在最后
+        let input2 = "/give @a wool";
+        let r2 = analyze(input2.into(), chars_at_end(input2));
+        assert!(
+            r2.suggestions
+                .iter()
+                .all(|s| s.insert.ends_with("_wool")),
+            "只应出现含 wool 的候选"
+        );
+        assert_eq!(
+            r2.suggestions.first().map(|s| s.insert.as_str()),
+            Some("black_wool"),
+            "同分时按字母序"
+        );
+    }
+
+    #[test]
+    fn scoreboard_subcommands_all_work() {
+        assert_all_succeed(&[
+            // ── objectives ──
+            "/scoreboard objectives add kills dummy",
+            "/scoreboard objectives add kills totalKillCount",
+            "/scoreboard objectives add kills dummy 击杀数",
+            "/scoreboard objectives add teamkills teamkill.red",
+            "/scoreboard objectives list",
+            "/scoreboard objectives remove kills",
+            "/scoreboard objectives setdisplay sidebar kills",
+            "/scoreboard objectives setdisplay sidebar",
+            "/scoreboard objectives modify kills displayname 击杀数",
+            "/scoreboard objectives modify kills rendertype hearts",
+            "/scoreboard objectives modify kills numberformat styled",
+            "/scoreboard objectives modify kills numberformat blank",
+            "/scoreboard objectives modify kills numberformat fixed 文本",
+            // ── players ──
+            "/scoreboard players list",
+            "/scoreboard players list @a",
+            "/scoreboard players get @a kills",
+            "/scoreboard players set @a kills 10",
+            "/scoreboard players add @a kills 1",
+            "/scoreboard players remove @a kills 1",
+            "/scoreboard players reset @a kills",
+            "/scoreboard players reset @a",
+            "/scoreboard players enable @a triggerObj",
+            "/scoreboard players operation @a kills += @s coins",
+            "/scoreboard players operation @a kills >< @s coins",
+            "/scoreboard players display name @a kills 击杀数",
+            "/scoreboard players display numberformat @a kills styled",
+            "/scoreboard players display numberformat @a kills blank",
+        ]);
+    }
+
+    #[test]
+    fn scoreboard_rejects_bad_input() {
+        for cmd in [
+            "/scoreboard objectives add kills",      // 缺判据
+            "/scoreboard objectives add kills dumy", // 判据拼错
+            "/scoreboard objectives bogus",          // 未知子指令
+            "/scoreboard players set @a kills abc",  // 分数不是整数
+        ] {
+            let r = execute(cmd.to_string());
+            assert!(!r.success, "{cmd} 本应失败，却通过了：{}", r.message);
+        }
+    }
+
+    #[test]
+    fn selectors_are_described() {
+        assert_eq!(reg::localize("@a"), "所有玩家");
+        assert_eq!(reg::localize("@p"), "最近的玩家");
+        assert_eq!(reg::localize("@e[type=zombie]"), "所有实体[type=僵尸]");
+        // 玩家名保持原样
+        assert_eq!(reg::localize("Notch"), "Notch");
+        // 认不出来的 ID 原样返回，不丢信息
+        assert_eq!(reg::localize("some_unknown_thing"), "some_unknown_thing");
     }
 }

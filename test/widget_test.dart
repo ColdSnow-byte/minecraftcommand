@@ -50,4 +50,29 @@ void main() {
     // 页面内样式不受影响（由 Material 提供）
     expect(pageStyle.color, isNot(const Color(0xD0FF0000)));
   });
+
+  // 发送按钮的图标颜色过渡用的是 TweenAnimationBuilder<Color?>。
+  // 若给它传泛型的 `Tween<Color>`，框架会走动态的 `+ - *` 插值，
+  // 而 Color 不支持这些运算，动画中间帧就会抛
+  // "Cannot lerp between ..."。这里锁住必须使用 ColorTween。
+  testWidgets('颜色过渡在中间帧不抛异常', (WidgetTester tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TweenAnimationBuilder<Color?>(
+          duration: const Duration(milliseconds: 100),
+          tween: ColorTween(begin: Colors.red, end: Colors.blue),
+          builder: (context, color, _) =>
+              Text('x', style: TextStyle(color: color)),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+
+    // 关键：中间帧才会触发 lerp
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
 }
