@@ -14,10 +14,14 @@ import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 /// - [minimal]：完全绕开着色器，退化成 `ClipPath + BackdropFilter + 染色`
 ///   的一层半透明衬底。观感最朴素，但也最省电。
 enum GlassQualityMode {
-  premium('极致', '边缘折射与色散，最接近 iOS 26 的观感；比较吃 GPU'),
-  standard('标准', '有模糊与染色，滑动流畅；没有折射色散'),
-  minimal('半透明', '只做一层背景模糊的半透明衬底，较省电'),
-  solid('纯色', '完全不用玻璃效果，直接在纯色块上叠文字，最省电也最稳');
+  premium('高', '边缘折射与色散，模糊与染色'),
+  standard('中', '有模糊与染色，没有折射色散'),
+  minimal('低', '仅半透明背景'),
+  solid('极低', '纯色块背景');
+  // premium('高', ''),
+  // standard('中', ''),
+  // minimal('低', ''),
+  // solid('极低', '');
 
   const GlassQualityMode(this.label, this.description);
 
@@ -54,6 +58,22 @@ GlassQuality qualityFor(GlassQualityMode mode) {
           ? GlassQuality.premium
           : GlassQuality.standard,
   };
+}
+
+/// 弹窗（库里的 `GlassDialog`）实际用的玻璃档位。
+///
+/// premium 要求组件自己开一块捕获图层（`LiquidGlass.withOwnLayer`，内部靠
+/// `toImageSync` 抓一次屏幕）。弹窗是**新挂载**的组件，这块层的几何信息在第一帧
+/// 还没建立起来，玻璃于是只画出一半、约 0.2 秒后才跳成完整——点左上角图标时
+/// 看到的"先冒出半个框、再变成整块"就是它。根因跟滚动列表里的卡片一样（见
+/// quality_panel.dart 里 `capQuality` 的说明）。
+///
+/// 所以这里把弹窗的玻璃封顶在 [GlassQuality.standard]：标准档走的是实时着色器
+/// （`LightweightLiquidGlass`，不抓屏），第一帧就是对的。代价是弹窗少了 premium
+/// 的折射与色散——比起每次打开都要闪一下，这个交换划算。
+GlassQuality dialogQualityFor(GlassQualityMode mode) {
+  final quality = qualityFor(mode);
+  return quality == GlassQuality.premium ? GlassQuality.standard : quality;
 }
 
 // 每个用 premium 的玻璃组件都要设 `useOwnLayer: true`。

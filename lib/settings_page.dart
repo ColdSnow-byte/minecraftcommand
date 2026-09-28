@@ -64,7 +64,7 @@ class SettingsPage extends StatelessWidget {
             _RowLabel(text: '主题色'),
             const SizedBox(height: 4),
             Text(
-              '决定提示文本、状态徽章与选中态的颜色',
+              '浅色主题色(推荐深色主题下使用)',
               style: TextStyle(color: palette.textMuted, fontSize: 11),
             ),
             const SizedBox(height: 12),
@@ -75,7 +75,7 @@ class SettingsPage extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             Text(
-              '深色（浅色模式下对比更清楚）',
+              '深色主题色(推荐浅色主题下使用)',
               style: TextStyle(color: palette.textMuted, fontSize: 11),
             ),
             const SizedBox(height: 10),
@@ -88,7 +88,7 @@ class SettingsPage extends StatelessWidget {
             _RowLabel(text: '质量等级'),
             const SizedBox(height: 4),
             Text(
-              '越高的档位越接近 iOS 26 的观感，也更吃 GPU；改完立即生效',
+              '越高的档位特效越多，也更吃 GPU，改完立即生效',
               style: TextStyle(color: palette.textMuted, fontSize: 11),
             ),
             const SizedBox(height: 10),
@@ -99,7 +99,7 @@ class SettingsPage extends StatelessWidget {
             _HairLine(),
             _SwitchRow(
               title: '光球环绕',
-              subtitle: '在每个玻璃面板的边缘绕行一颗拖尾光球（纯装饰，默认关闭）',
+              subtitle: '在每个面板的边缘绕行一颗拖尾光球',
               value: settings.orbitEnabled,
               onChanged: app.setOrbitEnabled,
             ),
@@ -141,7 +141,7 @@ class SettingsPage extends StatelessWidget {
             _ActionRow(
               title: settings.backgroundImagePath == null ? '选择背景图片' : '更换背景图片',
               subtitle: settings.backgroundImagePath == null
-                  ? '图片会复制到应用目录，原图删除后依然可用'
+                  ? '选择图片背景后可调整模糊和压暗'
                   : '已应用自定义背景',
               onTap: () => _pickBackground(context),
             ),
@@ -187,7 +187,7 @@ class SettingsPage extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(top: 2, bottom: 6),
           child: Text(
-            '设置会自动保存',
+            '',
             textAlign: TextAlign.center,
             style: TextStyle(color: palette.textMuted, fontSize: 11),
           ),

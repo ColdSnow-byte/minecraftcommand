@@ -8,6 +8,7 @@ import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 // app_settings.dart 与 history.dart 里，必须导入才能用。
 import 'app_layout.dart';
 import 'app_settings.dart';
+import 'glass.dart';
 import 'history.dart';
 import 'quality_panel.dart';
 import 'src/rust/api/minecraft.dart' as mc;
@@ -224,70 +225,27 @@ class _CommandConsolePageState extends State<CommandConsolePage>
     const version =
         '2.0.0'; // 与 pubspec.yaml / packaging\windows\installer.iss 保持一致
 
-    await GlassDialog.show<void>(
+    // 这里没有用库里的 `GlassDialog.show`：它内部固定走 `showCupertinoDialog`，
+    // 而那条路由会给整个弹窗套一层淡入（Opacity）。玻璃的 backdrop 采样一旦被
+    // Opacity 层包住就不生效——低档（半透明衬底）的弹窗于是"先露面、约 0.1 秒后
+    // 才变模糊"，等转场结束、Opacity 层被移除才补上；极低档本来就不该有玻璃，
+    // 也跟着糊一下。
+    //
+    // 所以自己起一个路由：barrier 照常淡入（它不碰玻璃），弹窗本体一帧到位，
+    // 外壳交给 [_AboutDialog]（按当前档位决定是玻璃还是纯色块）。
+    await showGeneralDialog<void>(
       context: context,
-      quality: context.glassQuality,
-      maxWidth: 420,
       barrierDismissible: true,
-      title: 'Minecraft 指令台',
-      actions: [
-        GlassDialogAction(
-          label: '知道了',
-          isPrimary: true,
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-      ],
-      content: DefaultTextStyle(
-        style: TextStyle(
-          color: context.palette.textSecondary,
-          fontSize: 13,
-          height: 1.45,
-        ),
-        child: SizedBox(
-          height: 340,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(
-                  child: Image.asset(
-                    'assets/app_icon.png',
-                    width: 56,
-                    height: 56,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                const _SectionTitle('软件信息'),
-                const _InfoRow('版本', version),
-                _InfoRow('内置指令', '$count 条'),
-                const _InfoRow('支持平台', 'Windows / Android'),
-                const SizedBox(height: 14),
-                const _SectionTitle('软件操作'),
-                const _StepRow(1, '输入以 / 开头的指令，例如 /give @a diamond 64'),
-                const _StepRow(2, '打字时下方蓝色徽章显示"光标提示"，告诉你当前该填什么参数'),
-                const _StepRow(
-                  3,
-                  '补全列表实时过滤，点击候选项补齐；按 Tab 键（手机端点 Tab 按钮）可在候选之间循环切换',
-                ),
-                const _StepRow(4, '参数错误时红色文字指出原因与位置，例如拼错的方块 / 物品 ID'),
-                const _StepRow(5, '指令完整时徽章变为绿色的"指令完整"，按回车或点发送按钮执行'),
-                const _StepRow(6, '执行成功弹绿色提示并写入历史记录；失败弹红色提示说明原因'),
-                const _StepRow(7, '在「设置 → 指令手册」里打开指令面板，可查看全部指令的用法，点任意一条即复制'),
-                const _StepRow(8, '再次点击左上角图标，可随时打开本说明'),
-                const SizedBox(height: 12),
-                Text(
-                  '提示：指令面板中带 OP 标记的指令需要管理员权限。'
-                  '本程序为指令语法校验与效果模拟器，不会连接真实游戏服务器。',
-                  style: TextStyle(
-                    color: context.palette.textTertiary,
-                    fontSize: 12,
-                    height: 1.4,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+      barrierLabel: '关闭说明',
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 200),
+      // 弹窗本体不做淡入/缩放：外层一旦包上 Opacity 或 Transform，玻璃的
+      // backdrop 采样就会被打乱（_HistoryCard 里那条注释讲的是同一个坑）
+      transitionBuilder: (_, _, _, child) => child,
+      pageBuilder: (dialogContext, _, _) => _AboutDialog(
+        version: version,
+        commandCount: count,
+        onDismiss: () => Navigator.of(dialogContext).pop(),
       ),
     );
   }
@@ -378,7 +336,7 @@ class _CommandConsolePageState extends State<CommandConsolePage>
             ),
             const SizedBox(height: 6),
             Text(
-              '试试输入 /gamemode cre',
+              '试试输入 /effect clear @p',
               style: TextStyle(color: palette.textTertiary, fontSize: 13),
             ),
           ],
@@ -492,6 +450,13 @@ class _CommandConsolePageState extends State<CommandConsolePage>
       key: _panelKey,
       radius: 24,
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      // 这个面板里嵌着一块可滚动的补全列表。premium 的玻璃要自己开一块捕获
+      // 图层，**在滚动上下文里它和内容会失去同步**：玻璃的背景/边框留在旧位置，
+      // 里面的文字已经在动了，看上去就是"文字没动、面板动了"，过一会儿才跳
+      // 回来。库文档把它列为已知的 Impeller 限制，项目里滚动列表中的卡片也是
+      // 这么处理的（见 quality_panel.dart 的 capQuality）。
+      // 标准档走的是实时着色器，不抓屏，滚动时也稳。
+      capQuality: GlassQuality.standard,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -557,6 +522,9 @@ class _CommandConsolePageState extends State<CommandConsolePage>
               // 列表本身可滚动。
               constraints: const BoxConstraints(maxHeight: 224),
               margin: const EdgeInsets.only(top: 8),
+              // 候选项入场是"从下方滑进来"，首尾两项的滑动会越出这块圆角容器
+              // （Container 默认不裁剪），看上去就成了文字压在边框上。裁进圆角里。
+              clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
                 color: context.palette.isDark
                     ? const Color(0x14101418)
@@ -650,6 +618,11 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                 height: 48,
                 quality: context.glassQuality,
                 useOwnLayer: true,
+                // 关掉"按住不放就朝手指方向拉长"的那段果冻手感：premium 档下
+                // 玻璃的边是烘在缓存纹理里的，缩放那层纹理会把边框拉糊——
+                // 按住 Tab 按钮往下拖时看到的边框错位就是它。拖动拉伸关掉后，
+                // 按压放大（iOS 26 那颗按钮的"胀一下"）还在。
+                stretch: 0,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -719,6 +692,8 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                   height: 48,
                   quality: context.glassQuality,
                   useOwnLayer: true,
+                  // 同上：不要拖动拉伸，否则按住往下拖会把玻璃边框拉错位
+                  stretch: 0,
                 ),
               ),
             ],
@@ -829,6 +804,173 @@ class _StepRow extends StatelessWidget {
 }
 
 // OP 标记的 _Pill 已经跟指令面板一起搬到 command_palette.dart
+
+// ─────────────────────── 关于弹窗 ───────────────────────
+
+/// 「软件信息与操作说明」弹窗。
+///
+/// 内容与之前交给库的 `GlassDialog` 时一致，只是外壳换成了项目自己的
+/// [QualityPanel]：极低档在这里会退化成纯色块（跟页面其它地方一样不碰玻璃），
+/// 其余档位照常出玻璃。
+class _AboutDialog extends StatelessWidget {
+  const _AboutDialog({
+    required this.version,
+    required this.commandCount,
+    required this.onDismiss,
+  });
+
+  final String version;
+  final int commandCount;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    // 弹窗里的玻璃封顶在标准档，理由见 glass.dart 的 dialogQualityFor
+    final quality = dialogQualityFor(context.appSettings.glassQualityMode);
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: QualityPanel(
+            radius: 24,
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
+            capQuality: quality,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Text(
+                  'Minecraft 指令台',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: palette.textPrimary,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                // 内容区高度写死：高度随内容浮动的话，玻璃面板每帧都要重新量边
+                SizedBox(
+                  height: 340,
+                  child: SingleChildScrollView(
+                    child: DefaultTextStyle(
+                      style: TextStyle(
+                        color: palette.textSecondary,
+                        fontSize: 13,
+                        height: 1.45,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Center(
+                            child: Image.asset(
+                              'assets/app_icon.png',
+                              width: 56,
+                              height: 56,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          const _SectionTitle('软件信息'),
+                          _InfoRow('版本', version),
+                          _InfoRow('内置指令', '$commandCount 条'),
+                          const _InfoRow('支持平台', 'Windows / Android'),
+                          const SizedBox(height: 14),
+                          const _SectionTitle('软件操作'),
+                          const _StepRow(1, '输入以 / 开头的指令，例如 /give @a diamond 64'),
+                          const _StepRow(2, '打字时下方蓝色徽章显示"光标提示"，告诉你当前该填什么参数'),
+                          const _StepRow(
+                            3,
+                            '补全列表实时过滤，点击候选项补齐；按 Tab 键（手机端点 Tab 按钮）可在候选之间循环切换',
+                          ),
+                          const _StepRow(4, '参数错误时红色文字指出原因与位置，例如拼错的方块 / 物品 ID'),
+                          const _StepRow(5, '指令完整时徽章变为绿色的"指令完整"，按回车或点发送按钮执行'),
+                          const _StepRow(6, '执行成功弹绿色提示并写入历史记录；失败弹红色提示说明原因'),
+                          const _StepRow(7, '在「设置 → 指令手册」里打开指令面板，可查看全部指令的用法，点任意一条即复制'),
+                          const _StepRow(8, '再次点击左上角图标，可随时打开本说明'),
+                          const SizedBox(height: 12),
+                          Text(
+                            '提示：指令面板中带 OP 标记的指令需要管理员权限。'
+                            '本程序为指令语法校验与效果模拟器，不会连接真实游戏服务器。',
+                            style: TextStyle(
+                              color: palette.textTertiary,
+                              fontSize: 12,
+                              height: 1.4,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _AboutDialogAction(onPressed: onDismiss, quality: quality),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 关于弹窗底部的确认按钮。
+///
+/// 玻璃档用库的 [GlassButton]；极低档换成一块纯色，跟面板一样不碰玻璃。
+class _AboutDialogAction extends StatelessWidget {
+  const _AboutDialogAction({required this.onPressed, required this.quality});
+
+  final VoidCallback onPressed;
+  final GlassQuality quality;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final label = Text(
+      '知道了',
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        color: palette.textPrimary,
+        fontSize: 15,
+        fontWeight: FontWeight.w700,
+      ),
+    );
+
+    if (!context.glassEnabled) {
+      return Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            height: 44,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: palette.accentHighlight,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: label,
+          ),
+        ),
+      );
+    }
+
+    return GlassButton.custom(
+      onTap: onPressed,
+      height: 44,
+      quality: quality,
+      useOwnLayer: true,
+      shape: const LiquidRoundedSuperellipse(borderRadius: 14),
+      glowColor: palette.accent.withValues(alpha: 0.30),
+      // 关掉"按住拖动会拉长"的果冻手感：premium 档下玻璃的边是烘在缓存纹理
+      // 里的，缩放那层纹理会把边框拉糊（库注释里承认的 Impeller 限制）
+      stretch: 0,
+      child: label,
+    );
+  }
+}
 
 // ─────────────────────────── 动效组件 ───────────────────────────
 
