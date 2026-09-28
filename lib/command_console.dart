@@ -1,35 +1,24 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 
+// `context.palette` / `context.history` 这两个扩展分别定义在
+// app_settings.dart 与 history.dart 里，必须导入才能用。
+import 'app_layout.dart';
+import 'app_settings.dart';
+import 'history.dart';
+import 'quality_panel.dart';
 import 'src/rust/api/minecraft.dart' as mc;
-
-const _kQuality = GlassQuality.standard;
-
-/// 深色背景下的文字色阶（白灰混色，保证在近黑底色上的可读性）：
-/// 主文本 → 次要文本 → 辅助/提示文本 → 弱提示。
-const Color _textPrimary = Color(0xFFF2F5F8);
-const Color _textSecondary = Color(0xFFC8D0D9);
-const Color _textTertiary = Color(0xFFA3ADB8);
-const Color _textMuted = Color(0xFF8B949F);
 
 /// 补全列表中单项的高度（固定值，配合 `ListView.itemExtent` 让高亮项
 /// 能被精确滚入可视区，也让入场错位动画的节奏可预测）
 const double _kSuggestionExtent = 32;
 
-/// 一条历史记录
-class _HistoryEntry {
-  /// 自增序号：作为列表项的 Key，使入场动画只在插入时播放一次，
-  /// 后续滚动/重建不会重播；同时让重复执行同一指令的记录彼此独立。
-  final int id;
-  final String command;
-  final bool success;
-  final String message;
-  const _HistoryEntry(this.id, this.command, this.success, this.message);
-}
+/// 页面里所有颜色都取自 `context.palette`（见 `app_palette.dart`），
+/// 不再有硬编码色值——换主题色、切明暗模式时整页一起变。
+/// 历史记录同理，读 `context.history`。
 
 class CommandConsolePage extends StatefulWidget {
   const CommandConsolePage({super.key});
@@ -43,8 +32,16 @@ class _CommandConsolePageState extends State<CommandConsolePage>
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   final _scrollController = ScrollController();
+
   /// 补全列表的滚动控制器：Tab 循环时用它把高亮项滚进可视区
   final _suggestionScroll = ScrollController();
+
+  /// 底部面板的范围。
+  ///
+  /// 点面板内部的控件（补全候选、Tab 按钮）时不该收起键盘：这些操作结束后
+  /// 会 requestFocus 回到输入框，若中间先 unfocus 一次，手机上输入法就会
+  /// 先隐后现地闪一下。
+  final _panelKey = GlobalKey();
 
   /// "指令完整"状态的呼吸动画：徽章脉动与发送按钮光晕共用同一节奏，
   /// 使两者在同一拍上，不会各跳各的。
@@ -52,13 +49,6 @@ class _CommandConsolePageState extends State<CommandConsolePage>
     vsync: this,
     duration: const Duration(milliseconds: 1600),
   );
-
-  /// 历史记录自增 id
-  int _historySeq = 0;
-  /// 已经播放过入场动画的记录 id。
-  ///
-  /// 列表项被回收后重建时不会再重播——否则往回滚动时会看到历史"重新浮现"。
-  final Set<int> _enteredHistory = <int>{};
 
   Timer? _debounce;
   List<mc.Suggestion> _suggestions = [];
@@ -70,10 +60,10 @@ class _CommandConsolePageState extends State<CommandConsolePage>
 
   /// Tab 补全过程：当前循环到的候选下标（-1 表示未开始）
   int _tabIndex = -1;
+
   /// 标记由代码（而非用户键入）触发的文本变更，用于区分是否重置循环下标
   bool _programmaticEdit = false;
 
-  final List<_HistoryEntry> _history = [];
   List<mc.CommandInfo> _allCommands = [];
 
   @override
@@ -133,9 +123,10 @@ class _CommandConsolePageState extends State<CommandConsolePage>
   void _ensureSuggestionVisible(int index) {
     if (!_suggestionScroll.hasClients) return;
     final position = _suggestionScroll.position;
-    final target = (index * _kSuggestionExtent -
-            (position.viewportDimension - _kSuggestionExtent) / 2)
-        .clamp(0.0, position.maxScrollExtent);
+    final target =
+        (index * _kSuggestionExtent -
+                (position.viewportDimension - _kSuggestionExtent) / 2)
+            .clamp(0.0, position.maxScrollExtent);
     if ((position.pixels - target).abs() < 0.5) return;
     _suggestionScroll.animateTo(
       target,
@@ -191,19 +182,32 @@ class _CommandConsolePageState extends State<CommandConsolePage>
     _analyzeNow();
   }
 
+  /// 点输入框以外的地方收起键盘，但**点底部面板里的控件不收起**。
+  ///
+  /// `GlassTextField` 默认的 `onTapOutside` 会直接 unfocus。补全候选和 Tab
+  /// 按钮都在输入框之外，点它们会先关掉输入法、再被 `requestFocus` 拉回来，
+  /// 手机上表现为输入法闪一下（中间还伴随一次布局跳动）。
+  void _onTapOutside(PointerDownEvent event) {
+    final box = _panelKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box != null && box.hasSize) {
+      final local = box.globalToLocal(event.position);
+      if ((Offset.zero & box.size).contains(local)) return;
+    }
+    _focusNode.unfocus();
+  }
+
   Future<void> _execute() async {
     final input = _controller.text.trim();
     if (input.isEmpty) return;
     final r = await mc.execute(input: input);
     if (!mounted) return;
-    setState(() {
-      _history.insert(0, _HistoryEntry(_historySeq++, input, r.success, r.message));
-    });
+    // 交给共享控制器：它会通知两个页面，并按设置决定是否落盘
+    context.history.add(input, r.success, r.message);
     GlassToast.show(
       context,
       message: r.message,
       type: r.success ? GlassToastType.success : GlassToastType.error,
-      quality: _kQuality,
+      quality: context.glassQuality,
     );
     if (r.success) {
       _controller.clear();
@@ -213,32 +217,32 @@ class _CommandConsolePageState extends State<CommandConsolePage>
 
   /// 点击左上角图标：显示软件信息与操作说明
   Future<void> _showAboutDialog() async {
-    final count = _allCommands.isEmpty ? (await mc.listCommands()).length : _allCommands.length;
+    final count = _allCommands.isEmpty
+        ? (await mc.listCommands()).length
+        : _allCommands.length;
     if (!mounted) return;
-    const version = '1.0.0'; // 与 pubspec.yaml / packaging\windows\installer.iss 保持一致
+    const version =
+        '2.0.0'; // 与 pubspec.yaml / packaging\windows\installer.iss 保持一致
 
     await GlassDialog.show<void>(
       context: context,
-      quality: _kQuality,
+      quality: context.glassQuality,
       maxWidth: 420,
       barrierDismissible: true,
       title: 'Minecraft 指令台',
       actions: [
         GlassDialogAction(
-          label: '关闭',
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        GlassDialogAction(
-          label: '指令面板',
+          label: '知道了',
           isPrimary: true,
-          onPressed: () {
-            Navigator.of(context).pop();
-            _showCommandPalette();
-          },
+          onPressed: () => Navigator.of(context).pop(),
         ),
       ],
       content: DefaultTextStyle(
-        style: const TextStyle(color: _textSecondary, fontSize: 13, height: 1.45),
+        style: TextStyle(
+          color: context.palette.textSecondary,
+          fontSize: 13,
+          height: 1.45,
+        ),
         child: SizedBox(
           height: 340,
           child: SingleChildScrollView(
@@ -246,7 +250,11 @@ class _CommandConsolePageState extends State<CommandConsolePage>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Center(
-                  child: Image.asset('assets/app_icon.png', width: 56, height: 56),
+                  child: Image.asset(
+                    'assets/app_icon.png',
+                    width: 56,
+                    height: 56,
+                  ),
                 ),
                 const SizedBox(height: 10),
                 const _SectionTitle('软件信息'),
@@ -258,116 +266,27 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                 const _StepRow(1, '输入以 / 开头的指令，例如 /give @a diamond 64'),
                 const _StepRow(2, '打字时下方蓝色徽章显示"光标提示"，告诉你当前该填什么参数'),
                 const _StepRow(
-                    3, '补全列表实时过滤，点击候选项补齐；按 Tab 键（手机端点 Tab 按钮）可在候选之间循环切换'),
+                  3,
+                  '补全列表实时过滤，点击候选项补齐；按 Tab 键（手机端点 Tab 按钮）可在候选之间循环切换',
+                ),
                 const _StepRow(4, '参数错误时红色文字指出原因与位置，例如拼错的方块 / 物品 ID'),
                 const _StepRow(5, '指令完整时徽章变为绿色的"指令完整"，按回车或点发送按钮执行'),
                 const _StepRow(6, '执行成功弹绿色提示并写入历史记录；失败弹红色提示说明原因'),
-                const _StepRow(7, '点右上角书本图标打开指令面板，可查看全部指令的用法，点击即填入输入框'),
+                const _StepRow(7, '在「设置 → 指令手册」里打开指令面板，可查看全部指令的用法，点任意一条即复制'),
                 const _StepRow(8, '再次点击左上角图标，可随时打开本说明'),
                 const SizedBox(height: 12),
-                const Text(
+                Text(
                   '提示：指令面板中带 OP 标记的指令需要管理员权限。'
                   '本程序为指令语法校验与效果模拟器，不会连接真实游戏服务器。',
-                  style: TextStyle(color: _textTertiary, fontSize: 12, height: 1.4),
+                  style: TextStyle(
+                    color: context.palette.textTertiary,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
                 ),
               ],
             ),
           ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showCommandPalette() async {
-    final cmds = _allCommands.isEmpty ? await mc.listCommands() : _allCommands;
-    if (!mounted) return;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xE6101014),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                '指令面板 · ${cmds.length} 条',
-                style: const TextStyle(color: _textPrimary, fontSize: 16, fontWeight: FontWeight.w600),
-              ),
-            ),
-            Expanded(
-              child: ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                itemCount: cmds.length,
-                itemBuilder: (ctx, i) {
-                  final c = cmds[i];
-                  return GlassCard(
-                    quality: _kQuality,
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    child: InkWell(
-                      onTap: () {
-                        Navigator.of(ctx).pop();
-                        _controller.text = '${c.usage} ';
-                        _controller.selection = TextSelection.collapsed(
-                          offset: _controller.text.length,
-                        );
-                        _focusNode.requestFocus();
-                        _analyzeNow();
-                      },
-                      borderRadius: BorderRadius.circular(12),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Text(
-                                  '/${c.name}',
-                                  style: const TextStyle(
-                                    color: Color(0xFF7EF0B2),
-                                    fontFamily: 'monospace',
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                                if (c.aliases.isNotEmpty) ...[
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    '别名：${c.aliases.join(', ')}',
-                                    style: const TextStyle(color: _textTertiary, fontSize: 11),
-                                  ),
-                                ],
-                                const Spacer(),
-                                if (c.opOnly)
-                                  const _Pill(label: 'OP', color: Color(0x66FFB74D)),
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              c.usage,
-                              style: const TextStyle(
-                                color: _textSecondary,
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              c.description,
-                              style: const TextStyle(color: _textTertiary, fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
         ),
       ),
     );
@@ -375,111 +294,114 @@ class _CommandConsolePageState extends State<CommandConsolePage>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0A0A0F),
-      body: Stack(
-        children: [
-          // 背景光斑
-          const _BackgroundGlow(),
-          SafeArea(
-            child: Column(
-              children: [
-                _buildHeader(),
-                Expanded(child: _buildHistory()),
-                _buildBottomPanel(),
-              ],
-            ),
-          ),
+    // 动态背景（含自定义图片与流光）已经由 AppShell 统一提供，
+    // 这里只负责三层内容：标题 → 历史 → 输入面板。
+    // bottom 交给外壳处理——底部是浮动的玻璃导航栏。
+    return SafeArea(
+      bottom: false,
+      child: Column(
+        children: <Widget>[
+          _buildHeader(),
+          Expanded(child: _buildHistory()),
+          _buildBottomPanel(),
         ],
       ),
     );
   }
 
   Widget _buildHeader() {
+    final palette = context.palette;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+      // 右侧留出浮在右上角的玻璃切换器：它是叠在页面之上的，
+      // 不扣掉这块宽度，书本按钮和标题就会被胶囊压住
+      padding: const EdgeInsets.fromLTRB(20, 8, kHeaderRightInset, 6),
       child: Row(
-        children: [
+        children: <Widget>[
           InkWell(
             onTap: _showAboutDialog,
             borderRadius: BorderRadius.circular(14),
-            splashColor: Colors.white12,
-            highlightColor: Colors.white10,
+            splashColor: palette.accent.withValues(alpha: 0.10),
+            highlightColor: palette.accent.withValues(alpha: 0.06),
             child: Padding(
               padding: const EdgeInsets.all(4),
-              child: Image.asset('assets/app_icon.png', width: 34, height: 34),
+              child: Image.asset('assets/app_icon.png', width: 30, height: 30),
             ),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
+              children: <Widget>[
                 Text(
                   'Minecraft CommandLine',
+                  // 右上角被切换器占了位置，窄屏上允许标题省略
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: _textPrimary,
-                    fontSize: 19,
+                    color: palette.textPrimary,
+                    // 比原来的 19px 小一档：页头这一行要同时容纳
+                    // 图标、标题、书本按钮和右上角的切换器
+                    fontSize: 15.5,
                     fontWeight: FontWeight.w700,
-                    letterSpacing: 0.3,
+                    letterSpacing: 0.2,
                   ),
                 ),
-                SizedBox(height: 2),
+                const SizedBox(height: 1),
                 Text(
                   'Rust 引擎驱动',
-                  style: TextStyle(color: _textTertiary, fontSize: 12),
+                  style: TextStyle(color: palette.textTertiary, fontSize: 11),
                 ),
               ],
             ),
           ),
-          GlassButton(
-            icon: const Icon(Icons.menu_book, color: Colors.white, size: 22),
-            onTap: _showCommandPalette,
-            width: 46,
-            height: 46,
-            quality: _kQuality,
-          ),
+          // 指令面板的入口已经移到设置页（页头这一行要给右上角的
+          // 玻璃切换器让位，放不下第四个元素）
         ],
       ),
     );
   }
 
   Widget _buildHistory() {
-    if (_history.isEmpty) {
+    final palette = context.palette;
+    final history = context.history;
+
+    if (history.isEmpty) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.history, color: Colors.white24, size: 56),
+          children: <Widget>[
+            Icon(Icons.history, color: palette.faintIcon, size: 56),
             const SizedBox(height: 12),
-            const Text(
+            Text(
               '执行过的指令会显示在这里',
-              style: TextStyle(color: _textTertiary, fontSize: 13),
+              style: TextStyle(color: palette.textTertiary, fontSize: 13),
             ),
             const SizedBox(height: 6),
-            const Text(
+            Text(
               '试试输入 /gamemode cre',
-              style: TextStyle(color: _textTertiary, fontSize: 13),
+              style: TextStyle(color: palette.textTertiary, fontSize: 13),
             ),
           ],
         ),
       );
     }
+
+    final items = history.items;
     return ListView.builder(
       controller: _scrollController,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: _history.length,
+      itemCount: items.length,
       itemBuilder: (ctx, i) {
-        final h = _history[i];
+        final h = items[i];
         // Key 用自增 id：新记录插入时它在 index 0 上"首次出现"而播放入场动画，
         // 已有记录随 index 下移时 element/State 被复用，动画不会重播。
         //
-        // `_enteredHistory.add` 返回 true 表示这条记录第一次被构建，只有它才播动画；
-        // 列表项被回收后重建时会得到 false，直接静止显示。
+        // `takeEntranceAnimation` 第一次问返回 true，之后都是 false——
+        // 列表项被回收后重建时直接静止显示，不会"重新浮现"。
         return _HistoryCard(
           key: ValueKey<int>(h.id),
           entry: h,
-          animate: _enteredHistory.add(h.id),
+          animate: history.takeEntranceAnimation(h.id),
         );
       },
     );
@@ -490,7 +412,9 @@ class _CommandConsolePageState extends State<CommandConsolePage>
   /// 光环用 `Positioned.fill` 撑在徽章下方，`_pulse` 从 0→1 时它同步放大、
   /// 同时淡出，形成"心跳"观感；非完整状态下它的透明度恒为 0，等于不存在。
   Widget _buildStatusBadge() {
-    final accent = _complete ? const Color(0xFF7EF0B2) : const Color(0xFF80DEEA);
+    final accent = _complete
+        ? context.palette.accent
+        : context.palette.accentSoft;
     return AnimatedBuilder(
       animation: _pulse,
       builder: (context, child) {
@@ -526,7 +450,9 @@ class _CommandConsolePageState extends State<CommandConsolePage>
         curve: Curves.easeOutCubic,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: BoxDecoration(
-          color: _complete ? const Color(0x337EF0B2) : const Color(0x3380DEEA),
+          color: _complete
+              ? context.palette.accentTint
+              : context.palette.accentTint,
           borderRadius: BorderRadius.circular(8),
         ),
         child: Row(
@@ -562,10 +488,10 @@ class _CommandConsolePageState extends State<CommandConsolePage>
   }
 
   Widget _buildBottomPanel() {
-    return GlassContainer(
-      quality: _kQuality,
+    return QualityPanel(
+      key: _panelKey,
+      radius: 24,
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-      shape: const LiquidRoundedSuperellipse(borderRadius: 24),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -578,7 +504,10 @@ class _CommandConsolePageState extends State<CommandConsolePage>
               Expanded(
                 child: Text(
                   _hint,
-                  style: const TextStyle(color: _textSecondary, fontSize: 12),
+                  style: TextStyle(
+                    color: context.palette.textSecondary,
+                    fontSize: 12,
+                  ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -589,8 +518,8 @@ class _CommandConsolePageState extends State<CommandConsolePage>
             const SizedBox(height: 6),
             Text(
               _usage,
-              style: const TextStyle(
-                color: _textTertiary,
+              style: TextStyle(
+                color: context.palette.textTertiary,
                 fontFamily: 'monospace',
                 fontSize: 11,
               ),
@@ -603,12 +532,19 @@ class _CommandConsolePageState extends State<CommandConsolePage>
             const SizedBox(height: 6),
             Row(
               children: [
-                const Icon(Icons.warning_amber_rounded, color: Color(0xFFFF8A80), size: 15),
+                Icon(
+                  Icons.warning_amber_rounded,
+                  color: context.palette.errorIcon,
+                  size: 15,
+                ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
                     _errors.first.message,
-                    style: const TextStyle(color: Color(0xFFFF8A80), fontSize: 12),
+                    style: TextStyle(
+                      color: context.palette.errorIcon,
+                      fontSize: 12,
+                    ),
                   ),
                 ),
               ],
@@ -622,9 +558,13 @@ class _CommandConsolePageState extends State<CommandConsolePage>
               constraints: const BoxConstraints(maxHeight: 224),
               margin: const EdgeInsets.only(top: 8),
               decoration: BoxDecoration(
-                color: const Color(0x14101418),
+                color: context.palette.isDark
+                    ? const Color(0x14101418)
+                    : const Color(0x0A000000),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white10),
+                border: Border.all(
+                  color: context.palette.textMuted.withValues(alpha: 0.18),
+                ),
               ),
               child: ListView.builder(
                 controller: _suggestionScroll,
@@ -658,12 +598,15 @@ class _CommandConsolePageState extends State<CommandConsolePage>
           const SizedBox(height: 10),
           // 输入行
           Row(
+            // 输入框折行长高时，两个按钮贴底而不是被拉到中间
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Expanded(
                 child: Focus(
                   // 桌面端：拦截 Tab 键做补全（否则会被焦点遍历吞掉）
                   onKeyEvent: (node, event) {
-                    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.tab) {
+                    if (event is KeyDownEvent &&
+                        event.logicalKey == LogicalKeyboardKey.tab) {
                       // 无候选时不拦截，交还给系统做焦点切换
                       if (_suggestions.isEmpty) return KeyEventResult.ignored;
                       _tabComplete();
@@ -674,15 +617,27 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                   child: GlassTextField(
                     controller: _controller,
                     focusNode: _focusNode,
-                    quality: _kQuality,
+                    // 开自己的图层：premium 需要有几何信息可捕获，见 glass.dart
+                    quality: context.glassQuality,
+                    useOwnLayer: true,
                     placeholder: '输入 / 开头的指令…',
-                    placeholderStyle: const TextStyle(color: _textMuted, fontSize: 14),
-                    textStyle: const TextStyle(
-                      color: _textPrimary,
+                    placeholderStyle: TextStyle(
+                      color: context.palette.textMuted,
+                      fontSize: 14,
+                    ),
+                    textStyle: TextStyle(
+                      color: context.palette.textPrimary,
                       fontFamily: 'monospace',
                       fontSize: 14,
                     ),
+                    // 内容折行时自动长高，最多 5 行，再多就在内部滚动
+                    minLines: 1,
+                    maxLines: 5,
+                    keyboardType: TextInputType.multiline,
+                    // 用 send 而不是 newline：回车执行指令，而不是插入换行
+                    textInputAction: TextInputAction.send,
                     onSubmitted: (_) => _execute(),
+                    onTapOutside: _onTapOutside,
                   ),
                 ),
               ),
@@ -693,14 +648,17 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                 enabled: _suggestions.isNotEmpty,
                 width: 56,
                 height: 48,
-                quality: _kQuality,
+                quality: context.glassQuality,
+                useOwnLayer: true,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Icon(
                       Icons.keyboard_tab,
                       size: 16,
-                      color: _suggestions.isNotEmpty ? const Color(0xFF80DEEA) : _textMuted,
+                      color: _suggestions.isNotEmpty
+                          ? context.palette.accentSoft
+                          : context.palette.textMuted,
                     ),
                     const SizedBox(width: 3),
                     Text(
@@ -708,7 +666,9 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: _suggestions.isNotEmpty ? _textPrimary : _textMuted,
+                        color: _suggestions.isNotEmpty
+                            ? context.palette.textPrimary
+                            : context.palette.textMuted,
                       ),
                     ),
                   ],
@@ -726,8 +686,9 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                       boxShadow: _complete
                           ? [
                               BoxShadow(
-                                color: const Color(0xFF7EF0B2)
-                                    .withValues(alpha: 0.30 * (0.35 + 0.65 * v)),
+                                color: context.palette.accent.withValues(
+                                  alpha: 0.30 * (0.35 + 0.65 * v),
+                                ),
                                 blurRadius: 12 + 14 * v,
                                 spreadRadius: 0.5 + 2 * v,
                               ),
@@ -745,8 +706,10 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                     // 做插值，而 Color 不支持这些运算，动画中间帧会抛
                     // "Cannot lerp between ..."。ColorTween 走 Color.lerp。
                     tween: ColorTween(
-                      begin: _textTertiary,
-                      end: _complete ? const Color(0xFF7EF0B2) : _textTertiary,
+                      begin: context.palette.textTertiary,
+                      end: _complete
+                          ? context.palette.accent
+                          : context.palette.textTertiary,
                     ),
                     builder: (context, color, _) =>
                         Icon(Icons.send_rounded, color: color, size: 22),
@@ -754,7 +717,8 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                   onTap: _execute,
                   width: 48,
                   height: 48,
-                  quality: _kQuality,
+                  quality: context.glassQuality,
+                  useOwnLayer: true,
                 ),
               ),
             ],
@@ -776,8 +740,8 @@ class _SectionTitle extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 8),
       child: Text(
         text,
-        style: const TextStyle(
-          color: Color(0xFF7EF0B2),
+        style: TextStyle(
+          color: context.palette.accent,
           fontSize: 13,
           fontWeight: FontWeight.w700,
           letterSpacing: 0.4,
@@ -804,13 +768,19 @@ class _InfoRow extends StatelessWidget {
             width: 74,
             child: Text(
               label,
-              style: const TextStyle(color: _textTertiary, fontSize: 12),
+              style: TextStyle(
+                color: context.palette.textTertiary,
+                fontSize: 12,
+              ),
             ),
           ),
           Expanded(
             child: Text(
               value,
-              style: const TextStyle(color: _textSecondary, fontSize: 12),
+              style: TextStyle(
+                color: context.palette.textSecondary,
+                fontSize: 12,
+              ),
             ),
           ),
         ],
@@ -837,14 +807,14 @@ class _StepRow extends StatelessWidget {
             height: 18,
             margin: const EdgeInsets.only(top: 1),
             decoration: BoxDecoration(
-              color: const Color(0x337EF0B2),
+              color: context.palette.accentTint,
               borderRadius: BorderRadius.circular(5),
             ),
             alignment: Alignment.center,
             child: Text(
               '$index',
-              style: const TextStyle(
-                color: Color(0xFF7EF0B2),
+              style: TextStyle(
+                color: context.palette.accent,
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
               ),
@@ -858,230 +828,7 @@ class _StepRow extends StatelessWidget {
   }
 }
 
-class _Pill extends StatelessWidget {
-  final String label;
-  final Color color;
-  const _Pill({required this.label, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: color,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.w700),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────── 背景：动态流光 ───────────────────────────
-
-/// 动态背景：若干色相光斑沿弧线缓慢漂移、呼吸，另有一道斜向光带周期性掠过。
-///
-/// 性能取舍：
-/// - 动画只发生在**绘制阶段**（[CustomPainter] 直接监听 [AnimationController]，
-///   通过 `super(repaint: ...)` 驱动），不触发 build / layout；
-/// - 外层套 [RepaintBoundary]，把重绘限制在这一层，上层的历史列表、
-///   玻璃面板不会跟着每帧重画；
-/// - 扫光在画布外一段距离时就存在，配合 clipRect 让进出场自然。
-class _BackgroundGlow extends StatefulWidget {
-  const _BackgroundGlow();
-
-  @override
-  State<_BackgroundGlow> createState() => _BackgroundGlowState();
-}
-
-class _BackgroundGlowState extends State<_BackgroundGlow>
-    with SingleTickerProviderStateMixin {
-  /// 一个完整循环的时长。取值偏长（36s）以保证"流光"是缓慢渗染而非闪烁。
-  static const _period = Duration(seconds: 36);
-
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: _period,
-  )..repeat();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // 系统开启"减弱动态效果"时退化为静态光斑（也顺带省电）
-    final reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    return Positioned.fill(
-      child: RepaintBoundary(
-        child: IgnorePointer(
-          child: CustomPaint(
-            painter: _GlowPainter(
-              animation:
-                  reduceMotion ? const AlwaysStoppedAnimation<double>(0) : _controller,
-            ),
-            willChange: true,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// 一个光斑的静态描述：渐变、归一化中心、半径系数、漂移幅度与相位。
-class _Blob {
-  _Blob({
-    required this.gradient,
-    required this.centerX,
-    required this.centerY,
-    required this.radius,
-    required this.driftX,
-    required this.driftY,
-    required this.phase,
-  });
-
-  final RadialGradient gradient;
-  /// 中心坐标，按画布宽/高归一化（允许 <0 或 >1，让光斑大部分留在画布外）
-  final double centerX;
-  final double centerY;
-  /// 半径系数，乘以画布短边
-  final double radius;
-  /// 单方向漂移幅度，分别乘以画布宽/高
-  final double driftX;
-  final double driftY;
-  /// 相位 0..1，用于错开各光斑的节奏
-  final double phase;
-}
-
-class _GlowPainter extends CustomPainter {
-  _GlowPainter({required this.animation}) : super(repaint: animation);
-
-  final Animation<double> animation;
-
-  static final List<_Blob> _blobs = [
-    _Blob(
-      gradient: const RadialGradient(
-        colors: [Color(0x2A10B981), Color(0x0010B981)],
-      ),
-      centerX: 0.88,
-      centerY: -0.06,
-      radius: 0.74,
-      driftX: 0.06,
-      driftY: 0.05,
-      phase: 0.00,
-    ),
-    _Blob(
-      gradient: const RadialGradient(
-        colors: [Color(0x223B82F6), Color(0x003B82F6)],
-      ),
-      centerX: -0.14,
-      centerY: 0.94,
-      radius: 0.86,
-      driftX: 0.08,
-      driftY: 0.06,
-      phase: 0.37,
-    ),
-    _Blob(
-      gradient: const RadialGradient(
-        colors: [Color(0x1C8B5CF6), Color(0x008B5CF6)],
-      ),
-      centerX: 1.04,
-      centerY: 0.54,
-      radius: 0.66,
-      driftX: 0.05,
-      driftY: 0.09,
-      phase: 0.68,
-    ),
-    _Blob(
-      gradient: const RadialGradient(
-        colors: [Color(0x1822D3EE), Color(0x0022D3EE)],
-      ),
-      centerX: 0.32,
-      centerY: 1.10,
-      radius: 0.58,
-      driftX: 0.10,
-      driftY: 0.04,
-      phase: 0.19,
-    ),
-  ];
-
-  /// 斜向扫光的渐变（沿光带法线方向由透明→亮→透明）
-  static const _sweepGradient = LinearGradient(
-    begin: Alignment.centerLeft,
-    end: Alignment.centerRight,
-    colors: [
-      Color(0x0000E5A0),
-      Color(0x1400E5A0),
-      Color(0x1F7DF9D0),
-      Color(0x1400E5A0),
-      Color(0x0000E5A0),
-    ],
-  );
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (size.isEmpty) return;
-    final t = animation.value;
-    final shortest = size.shortestSide;
-
-    canvas.clipRect(Offset.zero & size);
-    for (final b in _blobs) {
-      // 两个不同频率的正弦叠加，避免所有光斑整齐划一地摆动
-      final dx = math.sin((t + b.phase) * 2 * math.pi) * b.driftX * size.width;
-      final dy = math.cos((t * 0.74 + b.phase) * 2 * math.pi) * b.driftY * size.height;
-      final breath = 0.90 + 0.10 * math.sin((t * 1.37 + b.phase) * 2 * math.pi);
-
-      final center = Offset(
-        b.centerX * size.width + dx,
-        b.centerY * size.height + dy,
-      );
-      final radius = b.radius * shortest * breath;
-      canvas.drawCircle(
-        center,
-        radius,
-        Paint()
-          ..shader = b.gradient.createShader(
-            Rect.fromCircle(center: center, radius: radius),
-          ),
-      );
-    }
-
-    _paintSweep(canvas, size, t);
-  }
-
-  /// 一道低透明度的斜向光带：每个循环扫两次，其余时间留白形成间歇节奏。
-  void _paintSweep(Canvas canvas, Size size, double t) {
-    const travelPortion = 0.55; // 单次扫光占循环的比例
-    final progress = (t * 2) % 1.0;
-    if (progress > travelPortion) return;
-    final travel = progress / travelPortion; // 0..1
-
-    final bandWidth = size.width * 0.34;
-    final diagonal = math.sqrt(size.width * size.width + size.height * size.height);
-    final x = -bandWidth + travel * (size.width + bandWidth * 2);
-
-    canvas.save();
-    canvas.translate(size.width / 2, size.height / 2);
-    canvas.rotate(-0.42); // 斜向 ≈ -24°
-    final rect = Rect.fromCenter(
-      center: Offset(x - size.width / 2, 0),
-      width: bandWidth,
-      height: diagonal * 1.2,
-    );
-    canvas.drawRect(rect, Paint()..shader = _sweepGradient.createShader(rect));
-    canvas.restore();
-  }
-
-  /// 重绘完全由 `repaint: animation` 驱动；此处只需处理"换了一个动画源"
-  /// （例如系统切换了减弱动态效果）时的重绘。
-  @override
-  bool shouldRepaint(_GlowPainter oldDelegate) =>
-      oldDelegate.animation != animation;
-}
+// OP 标记的 _Pill 已经跟指令面板一起搬到 command_palette.dart
 
 // ─────────────────────────── 动效组件 ───────────────────────────
 
@@ -1090,7 +837,10 @@ class _GlowPainter extends CustomPainter {
 /// 用 `platformDispatcher` 而不是 `MediaQuery`：这样在 `initState` 里就能取到，
 /// 不必等到 `didChangeDependencies`，组件可以保持无状态依赖。
 bool _reduceMotion() => WidgetsBinding
-    .instance.platformDispatcher.accessibilityFeatures.disableAnimations;
+    .instance
+    .platformDispatcher
+    .accessibilityFeatures
+    .disableAnimations;
 
 /// 一次性入场：淡入 + 轻微上滑，并按 [index] 依次延迟形成错位节奏。
 class _StaggerIn extends StatefulWidget {
@@ -1113,8 +863,10 @@ class _StaggerInState extends State<_StaggerIn>
     duration: const Duration(milliseconds: 260),
   );
 
-  late final CurvedAnimation _curve =
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic);
+  late final CurvedAnimation _curve = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOutCubic,
+  );
 
   @override
   void initState() {
@@ -1173,7 +925,7 @@ class _SuggestionTile extends StatelessWidget {
         duration: _transition,
         curve: Curves.easeOutCubic,
         decoration: BoxDecoration(
-          color: active ? const Color(0x227EF0B2) : Colors.transparent,
+          color: active ? context.palette.accentHighlight : Colors.transparent,
           borderRadius: BorderRadius.circular(8),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -1188,7 +940,7 @@ class _SuggestionTile extends StatelessWidget {
               transform: Matrix4.translationValues(active ? 0 : -4, 0, 0),
               transformAlignment: Alignment.center,
               decoration: BoxDecoration(
-                color: const Color(0xFF7EF0B2).withValues(alpha: active ? 1 : 0),
+                color: context.palette.accent.withValues(alpha: active ? 1 : 0),
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -1196,7 +948,7 @@ class _SuggestionTile extends StatelessWidget {
             Text(
               suggestion.label,
               style: TextStyle(
-                color: active ? const Color(0xFF7EF0B2) : const Color(0xFFB2EBF2),
+                color: active ? context.palette.accent : context.palette.accent,
                 fontFamily: 'monospace',
                 fontSize: 13,
                 fontWeight: FontWeight.w600,
@@ -1206,7 +958,10 @@ class _SuggestionTile extends StatelessWidget {
             Expanded(
               child: Text(
                 suggestion.detail,
-                style: const TextStyle(color: _textTertiary, fontSize: 11),
+                style: TextStyle(
+                  color: context.palette.textTertiary,
+                  fontSize: 11,
+                ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -1214,7 +969,9 @@ class _SuggestionTile extends StatelessWidget {
             Icon(
               Icons.keyboard_tab,
               size: 13,
-              color: active ? const Color(0xFF7EF0B2) : _textMuted,
+              color: active
+                  ? context.palette.accent
+                  : context.palette.textMuted,
             ),
           ],
         ),
@@ -1225,13 +982,10 @@ class _SuggestionTile extends StatelessWidget {
 
 /// 历史记录卡片：新记录插入时淡入，并自上而下滑入。
 class _HistoryCard extends StatefulWidget {
-  const _HistoryCard({
-    super.key,
-    required this.entry,
-    required this.animate,
-  });
+  const _HistoryCard({super.key, required this.entry, required this.animate});
 
-  final _HistoryEntry entry;
+  final HistoryRecord entry;
+
   /// 是否播放入场动画（只在该记录首次出现时为 true）
   final bool animate;
 
@@ -1246,8 +1000,10 @@ class _HistoryCardState extends State<_HistoryCard>
     duration: const Duration(milliseconds: 340),
   );
 
-  late final CurvedAnimation _curve =
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic);
+  late final CurvedAnimation _curve = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOutCubic,
+  );
 
   @override
   void initState() {
@@ -1276,9 +1032,13 @@ class _HistoryCardState extends State<_HistoryCard>
     // backdrop 采样，构建时直接断言失败（红屏）。
     // 而历史列表在执行第一条指令之前是空的，所以只有"执行指令后"才会
     // 第一次构建出这张卡片——故障时机正好吻合。
-    return GlassCard(
-      quality: _kQuality,
+    return QualityPanel(
+      radius: 12,
+      padding: const EdgeInsets.all(16),
       margin: const EdgeInsets.symmetric(vertical: 5),
+      // 列表卡片封顶在标准档：premium 在滚动容器里会出现背景发黑、
+      // 内容跑到面板外、约 0.2 秒后才跳回来的故障（官方承认的限制）
+      capQuality: GlassQuality.standard,
       child: FadeTransition(
         opacity: _curve,
         child: SlideTransition(
@@ -1291,7 +1051,9 @@ class _HistoryCardState extends State<_HistoryCard>
             children: [
               Icon(
                 h.success ? Icons.check_circle : Icons.error,
-                color: h.success ? const Color(0xFF7EF0B2) : const Color(0xFFFF8A80),
+                color: h.success
+                    ? context.palette.accent
+                    : context.palette.errorIcon,
                 size: 20,
               ),
               const SizedBox(width: 10),
@@ -1301,8 +1063,8 @@ class _HistoryCardState extends State<_HistoryCard>
                   children: [
                     Text(
                       h.command,
-                      style: const TextStyle(
-                        color: _textPrimary,
+                      style: TextStyle(
+                        color: context.palette.textPrimary,
                         fontFamily: 'monospace',
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
@@ -1314,7 +1076,9 @@ class _HistoryCardState extends State<_HistoryCard>
                     Text(
                       h.message,
                       style: TextStyle(
-                        color: h.success ? _textTertiary : const Color(0xFFFFAB91),
+                        color: h.success
+                            ? context.palette.textTertiary
+                            : context.palette.errorText,
                         fontSize: 12,
                         fontStyle: FontStyle.italic,
                         height: 1.5,

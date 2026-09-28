@@ -1,19 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:minecraftcommand/app_settings.dart';
 import 'package:minecraftcommand/main.dart';
 
 void main() {
   // UI 依赖 RustLib（flutter_rust_bridge）原生库，
   // 无法在纯 Dart 测试环境中 pump，这里做基本的类型与常量检查。
   test('app widget type exists', () {
-    const app = MinecraftCommandApp();
+    const app = MinecraftCommandApp(initialSettings: AppSettings());
     expect(app, isA<MinecraftCommandApp>());
   });
 
   // MaterialApp 会用 _errorTextStyle（黄色双下划线）包裹整个应用，
   // Overlay 条目（Toast）不在 Material 内部，需要 builder 提供正常样式。
-  testWidgets('overlay entries inherit a normal DefaultTextStyle', (WidgetTester tester) async {
+  testWidgets('overlay entries inherit a normal DefaultTextStyle', (
+    WidgetTester tester,
+  ) async {
     TextStyle? overlayStyle;
     TextStyle? pageStyle;
 

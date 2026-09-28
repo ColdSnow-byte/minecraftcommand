@@ -814,6 +814,7 @@ const DICT: &[(&str, &str)] = &[
     ("styled", "样式化"),
     ("blank", "空白"),
     ("fixed", "固定"),
+    ("masked", "仅非空气方块"),
     ("belowName", "名称下方"),
     ("dummy", "虚拟"),
     ("trigger", "触发器"),

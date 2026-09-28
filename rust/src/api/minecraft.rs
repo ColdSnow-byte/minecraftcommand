@@ -107,6 +107,8 @@ enum ArgType {
     DisplaySlot,
     /// 记分板的数字渲染类型
     RenderType,
+    /// `clone` 的过滤模式
+    CloneFilter,
     /// 记分板运算符号（`+=`、`*=` 等）
     Operation,
     /// 结构名称（locate）
@@ -235,6 +237,7 @@ fn commands() -> Vec<Cmd> {
                 vec![lit("give"), arg("target", ArgType::Selector), arg("effect", ArgType::Effect), opt("seconds", ArgType::Int), opt("amplifier", ArgType::Int)],
                 vec![lit("give"), arg("target", ArgType::Selector), arg("effect", ArgType::Effect), opt("seconds", ArgType::Int), opt("amplifier", ArgType::Int), opt("hide_particles", ArgType::Bool)],
                 vec![lit("clear"), opt("target", ArgType::Selector)],
+                vec![lit("clear"), opt("target", ArgType::Selector), opt("effect", ArgType::Effect)],
             ],
         },
         Cmd {
@@ -324,6 +327,14 @@ fn commands() -> Vec<Cmd> {
                     let mut v = pos3();
                     v.extend(pos3());
                     v.extend(pos3());
+                    v.push(opt("filter", ArgType::CloneFilter));
+                    v
+                },
+                {
+                    let mut v = pos3();
+                    v.extend(pos3());
+                    v.extend(pos3());
+                    v.push(opt("filter", ArgType::CloneFilter));
                     v.push(opt("mode", ArgType::CloneMode));
                     v
                 },
@@ -410,11 +421,15 @@ fn commands() -> Vec<Cmd> {
         Cmd {
             name: "xp",
             aliases: &["experience"],
-            desc: "增加经验",
+            desc: "增加、设置或查询经验",
             op: true,
             branches: vec![
                 vec![lit("add"), arg("target", ArgType::Selector), arg("amount", ArgType::Int)],
                 vec![lit("add"), arg("target", ArgType::Selector), arg("amount", ArgType::Int), opt("unit", ArgType::XpUnit)],
+                vec![lit("set"), arg("target", ArgType::Selector), arg("amount", ArgType::Int)],
+                vec![lit("set"), arg("target", ArgType::Selector), arg("amount", ArgType::Int), opt("unit", ArgType::XpUnit)],
+                vec![lit("query"), arg("target", ArgType::Selector), arg("amount", ArgType::Int)],
+                vec![lit("query"), arg("target", ArgType::Selector), arg("amount", ArgType::Int), opt("unit", ArgType::XpUnit)],
             ],
         },
         Cmd {
@@ -428,6 +443,12 @@ fn commands() -> Vec<Cmd> {
                 {
                     let mut v = vec![opt("target", ArgType::Selector)];
                     v.extend(pos3());
+                    v
+                },
+                {
+                    let mut v = vec![opt("target", ArgType::Selector)];
+                    v.extend(pos3());
+                    v.push(opt("angle", ArgType::Float));
                     v
                 },
             ],
@@ -784,6 +805,7 @@ fn commands() -> Vec<Cmd> {
                     v.extend(pos3());
                     v.push(opt("volume", ArgType::Float));
                     v.push(opt("pitch", ArgType::Float));
+                    v.push(opt("minVolume", ArgType::Float));
                     v
                 },
             ],
@@ -883,11 +905,44 @@ fn commands() -> Vec<Cmd> {
         Cmd {
             name: "damage",
             aliases: &[],
-            desc: "对实体造成伤害",
+            desc: "对实体造成伤害（可指定来源位置或来源实体）",
             op: true,
             branches: vec![
                 vec![arg("target", ArgType::Selector), arg("amount", ArgType::Float)],
-                vec![arg("target", ArgType::Selector), arg("amount", ArgType::Float), arg("type", ArgType::DamageType)],
+                vec![
+                    arg("target", ArgType::Selector),
+                    arg("amount", ArgType::Float),
+                    arg("damageType", ArgType::DamageType),
+                ],
+                // `at <location>`：把伤害来源记在某个坐标上
+                {
+                    let mut v = vec![
+                        arg("target", ArgType::Selector),
+                        arg("amount", ArgType::Float),
+                        arg("damageType", ArgType::DamageType),
+                        lit("at"),
+                    ];
+                    v.extend(pos3());
+                    v
+                },
+                // `by <entity>`：把伤害来源记在某个实体上
+                vec![
+                    arg("target", ArgType::Selector),
+                    arg("amount", ArgType::Float),
+                    arg("damageType", ArgType::DamageType),
+                    lit("by"),
+                    arg("entity", ArgType::Selector),
+                ],
+                // `by <entity> from <cause>`：再指定真正的起因
+                vec![
+                    arg("target", ArgType::Selector),
+                    arg("amount", ArgType::Float),
+                    arg("damageType", ArgType::DamageType),
+                    lit("by"),
+                    arg("entity", ArgType::Selector),
+                    lit("from"),
+                    arg("cause", ArgType::Selector),
+                ],
             ],
         },
         Cmd {
@@ -1457,6 +1512,7 @@ fn enum_values(ty: ArgType) -> Option<&'static [&'static str]> {
         ArgType::DisplaySlot => Some(reg::DISPLAY_SLOTS),
         ArgType::RenderType => Some(&["integer", "hearts"]),
         ArgType::Operation => Some(&["=", "+=", "-=", "*=", "/=", "%=", "><", "<", ">"]),
+        ArgType::CloneFilter => Some(&["replace", "masked"]),
         ArgType::Advancement => Some(reg::ADVANCEMENTS),
         ArgType::Particle => Some(reg::PARTICLES),
         ArgType::Feature => Some(reg::PLACE_FEATURES),
@@ -1497,6 +1553,7 @@ fn describe(ty: ArgType) -> &'static str {
         ArgType::DisplaySlot => "显示槽位：sidebar / list / belowName 等",
         ArgType::RenderType => "数字渲染：integer（整数）或 hearts（心形）",
         ArgType::Operation => "运算：= / += / -= / *= / /= / %= / >< / < / >",
+        ArgType::CloneFilter => "过滤：replace（全部复制）或 masked（只复制非空气方块）",
         ArgType::Structure => "结构名称，例如 village、ancient_city",
         ArgType::Biome => "生物群系，例如 plains、cherry_grove",
         ArgType::DamageType => "伤害类型，例如 fall、explosion",
@@ -3046,9 +3103,10 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
         }
         "effect" => {
             if args[0] == "clear" {
-                match args.get(1) {
-                    Some(_) => format!("已清除 {} 身上的所有状态效果", cn[1]),
-                    None => "已清除自己身上的所有状态效果".into(),
+                match (args.get(1), args.get(2)) {
+                    (Some(_), Some(_)) => format!("已清除 {} 身上的【{}】效果", cn[1], cn[2]),
+                    (Some(_), None) => format!("已清除 {} 身上的所有状态效果", cn[1]),
+                    (None, _) => "已清除自己身上的所有状态效果".into(),
                 }
             } else {
                 let secs = args.get(3).cloned().unwrap_or_else(|| "30".into());
@@ -3100,10 +3158,15 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
                 args[0], args[1], args[2], args[3], args[4], args[5]
             );
             let target = format!("({}, {}, {})", args[6], args[7], args[8]);
-            match args.get(9) {
-                Some(_) => format!("已将{source} 的方块克隆到{target}，方式：{}", cn[9]),
-                None => format!("已将{source} 的方块克隆到{target}"),
+            // 第 10、11 个参数依次是过滤模式与复制方式，都可省略
+            let mut tail = String::new();
+            if args.get(9).is_some() {
+                tail.push_str(&format!("，过滤：{}", cn[9]));
             }
+            if args.get(10).is_some() {
+                tail.push_str(&format!("，方式：{}", cn[10]));
+            }
+            format!("已将{source} 的方块克隆到{target}{tail}")
         }
         "kill" => match args.first() {
             Some(_) => format!("已杀死{}", cn[0]),
@@ -3168,15 +3231,41 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
             }
         }
         "xp" | "experience" => {
-            let unit = args.get(3).cloned().unwrap_or_else(|| "points".into());
-            if unit == "levels" {
-                format!("已给予 {} {} 级经验值", cn[1], args[2])
-            } else {
-                format!("已给予 {} {} 点经验值", cn[1], args[2])
+            let levels = args.get(3).map(|s| s.as_str()).unwrap_or("points") == "levels";
+            match args[0].as_str() {
+                "set" => format!(
+                    "已将 {} 的经验{}设为 {}",
+                    cn[1],
+                    if levels { "等级" } else { "点数" },
+                    args[2]
+                ),
+                "query" => format!(
+                    "{} 当前有 {} {}（模拟）",
+                    cn[1],
+                    args[2],
+                    if levels { "级" } else { "点经验" }
+                ),
+                _ => format!(
+                    "已给予 {} {} {}",
+                    cn[1],
+                    args[2],
+                    if levels { "级经验值" } else { "点经验值" }
+                ),
             }
         }
         "spawnpoint" => match args.first() {
-            Some(_) => format!("已将 {} 的出生点设置为当前坐标", cn[0]),
+            Some(_) => {
+                let place = if args.len() >= 4 {
+                    format!("坐标 ({}, {}, {})", args[1], args[2], args[3])
+                } else {
+                    "当前坐标".to_string()
+                };
+                let angle = match args.get(4) {
+                    Some(_) => format!("，朝向 {}", args[4]),
+                    None => String::new(),
+                };
+                format!("已将 {} 的出生点设置为{place}{angle}", cn[0])
+            }
             None => "已将自己的出生点设置为当前坐标".into(),
         },
         "gamerule" => match args.get(1) {
@@ -3375,6 +3464,9 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
                     args.get(7).cloned().unwrap_or_else(|| "1".into())
                 );
             }
+            if let Some(v) = args.get(8) {
+                base = format!("{base}，最小音量 {v}");
+            }
             base
         }
         "stopsound" => match args.get(2) {
@@ -3450,10 +3542,24 @@ fn execute_message(cmd_name: &str, args: &[String]) -> String {
             Some(_) => format!("已清除 {} 的出生点", cn[0]),
             None => "已清除自己的出生点".into(),
         },
-        "damage" => match args.get(2) {
-            Some(_) => format!("已对 {} 造成 {} 点{}伤害", cn[0], args[1], cn[2]),
-            None => format!("已对 {} 造成 {} 点伤害", cn[0], args[1]),
-        },
+        "damage" => {
+            let base = match args.get(2) {
+                Some(_) => format!("已对 {} 造成 {} 点{}伤害", cn[0], args[1], cn[2]),
+                None => format!("已对 {} 造成 {} 点伤害", cn[0], args[1]),
+            };
+            // 尾部：`at <坐标>` 或 `by <实体> [from <起因>]`
+            match args.get(3).map(|s| s.as_str()) {
+                Some("at") => format!(
+                    "{base}，伤害来源位于坐标 ({}, {}, {})",
+                    args[4], args[5], args[6]
+                ),
+                Some("by") => match args.get(5) {
+                    Some(_) => format!("{base}，伤害来源为 {}，起因是 {}", cn[4], cn[6]),
+                    None => format!("{base}，伤害来源为 {}", cn[4]),
+                },
+                _ => base,
+            }
+        }
         "ride" => {
             if args[1] == "mount" {
                 format!("已让 {} 骑上【{}】", cn[0], cn[2])
@@ -4483,6 +4589,117 @@ mod tests {
         );
     }
 
+    // ───────────── damage 的 at / by / from ─────────────
+
+    #[test]
+    fn damage_supports_at_by_from() {
+        assert_all_succeed(&[
+            "/damage @a 5",
+            "/damage @a 5 fall",
+            "/damage @a 5 fall at 1 2 3",
+            "/damage @a 5 fall at ~ ~1 ~",
+            "/damage @a 5 fall by @p",
+            "/damage @a 5 fall by @p from @s",
+            "/damage @e[type=zombie] 3 arrow at 0 64 0",
+        ]);
+    }
+
+    #[test]
+    fn damage_reports_source() {
+        let r = execute("/damage @a 5 fall at 1 2 3".into());
+        assert!(r.success, "message = {}", r.message);
+        assert!(r.message.contains("摔落"), "message = {}", r.message);
+        assert!(r.message.contains("(1, 2, 3)"), "message = {}", r.message);
+
+        let r2 = execute("/damage @a 5 fall by @p from @s".into());
+        assert!(r2.success, "message = {}", r2.message);
+        assert!(r2.message.contains("最近的玩家"), "message = {}", r2.message);
+        assert!(r2.message.contains("指令执行者"), "message = {}", r2.message);
+    }
+
+    #[test]
+    fn damage_suggests_at_and_by() {
+        // 打完伤害类型后，应提示还能接 at / by
+        let input = "/damage @a 5 fall ";
+        let r = analyze(input.into(), chars_at_end(input));
+        let labels: Vec<&str> = r.suggestions.iter().map(|s| s.insert.as_str()).collect();
+        assert!(labels.contains(&"at"), "suggestions = {labels:?}");
+        assert!(labels.contains(&"by"), "suggestions = {labels:?}");
+
+        // `at` 之后是坐标
+        let input2 = "/damage @a 5 fall at ";
+        let r2 = analyze(input2.into(), chars_at_end(input2));
+        assert!(
+            r2.suggestions.iter().any(|s| s.insert == "~"),
+            "suggestions = {:?}",
+            r2.suggestions
+                .iter()
+                .map(|s| s.insert.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // `by` 之后是实体选择器
+        let input3 = "/damage @a 5 fall by ";
+        let r3 = analyze(input3.into(), chars_at_end(input3));
+        assert!(
+            r3.suggestions.iter().any(|s| s.insert.starts_with('@')),
+            "suggestions = {:?}",
+            r3.suggestions
+                .iter()
+                .map(|s| s.insert.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ───────────── 各指令补齐的分支 ─────────────
+
+    #[test]
+    fn previously_missing_branches_are_filled() {
+        assert_all_succeed(&[
+            // xp 的 set / query
+            "/xp add @p 30",
+            "/xp add @p 30 levels",
+            "/xp set @p 100",
+            "/xp set @p 5 levels",
+            "/xp query @p 30",
+            "/xp query @p 5 levels",
+            // effect clear 指定单个效果
+            "/effect clear @a",
+            "/effect clear @a speed",
+            // clone 的过滤模式
+            "/clone 0 0 0 2 2 2 10 10 10",
+            "/clone 0 0 0 2 2 2 10 10 10 masked",
+            "/clone 0 0 0 2 2 2 10 10 10 replace force",
+            "/clone 0 0 0 2 2 2 10 10 10 masked move",
+            // spawnpoint 的朝向
+            "/spawnpoint @a 0 64 0",
+            "/spawnpoint @a 0 64 0 90",
+            // playsound 的最小音量
+            "/playsound entity.player.levelup master @a ~ ~ ~ 1 1 1",
+        ]);
+    }
+
+    #[test]
+    fn filled_branch_messages_are_descriptive() {
+        let r = execute("/xp set @p 5 levels".into());
+        assert!(r.success, "message = {}", r.message);
+        assert!(r.message.contains("等级"), "message = {}", r.message);
+
+        let r2 = execute("/effect clear @a speed".into());
+        assert!(r2.success, "message = {}", r2.message);
+        assert!(r2.message.contains("迅捷"), "message = {}", r2.message);
+
+        let r3 = execute("/clone 0 0 0 2 2 2 10 10 10 masked force".into());
+        assert!(r3.success, "message = {}", r3.message);
+        assert!(r3.message.contains("过滤"), "message = {}", r3.message);
+        assert!(r3.message.contains("方式"), "message = {}", r3.message);
+
+        let r4 = execute("/spawnpoint @a 0 64 0 90".into());
+        assert!(r4.success, "message = {}", r4.message);
+        assert!(r4.message.contains("(0, 64, 0)"), "message = {}", r4.message);
+        assert!(r4.message.contains("90"), "message = {}", r4.message);
+    }
+
     // ───────────── 中文反馈 ─────────────
 
     #[test]
@@ -4555,7 +4772,7 @@ mod tests {
             "/tp @a @s",
             "/tp 1 2 3",
             "/fill 0 0 0 3 3 3 white_wool hollow",
-            "/clone 0 0 0 2 2 2 10 10 10 force",
+            "/clone 0 0 0 2 2 2 10 10 10 replace force",
             "/playsound entity.player.levelup master @a",
             "/damage @e 5 fall",
             "/execute as @a at @s run give @s diamond 1",

@@ -9,7 +9,7 @@
 
 #define MyAppName "Minecraft"
 #define MyAppNameEn "MinecraftCommand"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "minecraftcommand"
 #define MyAppExeName "minecraftcommand.exe"
 ; Release 产物目录（相对本脚本所在目录：packaging/windows → 项目根）
