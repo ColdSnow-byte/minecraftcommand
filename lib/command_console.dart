@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
@@ -17,6 +18,14 @@ import 'src/rust/api/minecraft.dart' as mc;
 /// 能被精确滚入可视区，也让入场错位动画的节奏可预测）
 const double _kSuggestionExtent = 32;
 
+/// 新记录从输入框飞进列表顶部的时长。
+const Duration _kFlyDuration = Duration(milliseconds: 460);
+
+/// 飞入动画的曲线：起步快、落位慢，做成非线性。
+///
+/// 列表让出的空位与飞行中的替身卡片共用这一条曲线，两边才会同时到位。
+const Curve _kFlyCurve = Curves.easeOutCubic;
+
 /// 页面里所有颜色都取自 `context.palette`（见 `app_palette.dart`），
 /// 不再有硬编码色值——换主题色、切明暗模式时整页一起变。
 /// 历史记录同理，读 `context.history`。
@@ -29,7 +38,7 @@ class CommandConsolePage extends StatefulWidget {
 }
 
 class _CommandConsolePageState extends State<CommandConsolePage>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   final _scrollController = ScrollController();
@@ -43,6 +52,36 @@ class _CommandConsolePageState extends State<CommandConsolePage>
   /// 会 requestFocus 回到输入框，若中间先 unfocus 一次，手机上输入法就会
   /// 先隐后现地闪一下。
   final _panelKey = GlobalKey();
+
+  /// 输入框。新执行的指令从它所在的位置起飞（见 [_startFlyIn]）。
+  final _inputKey = GlobalKey();
+
+  /// 飞入期间那份"离屏"的真卡片。
+  ///
+  /// 它只参与布局、不参与绘制（`Offstage`），两个用处：让列表按它的自然
+  /// 高度留出空位，以及量出它的位置与尺寸给飞行的替身卡片当落点。
+  final _flyingCardKey = GlobalKey();
+
+  /// 飞入动画：0 = 还停在输入框位置，1 = 已经落到列表顶部。
+  late final AnimationController _fly = AnimationController(
+    vsync: this,
+    duration: _kFlyDuration,
+  );
+
+  /// 正在飞入的那条记录（null = 没有动画在跑）
+  HistoryRecord? _flying;
+
+  /// 起飞高度：输入框上边缘在页面坐标系里的 y
+  double? _flyStartY;
+
+  /// 落点：列表顶部那张卡片（含内外边距）在页面坐标系里的矩形；量到之前为 null
+  Rect? _flyDest;
+
+  /// 刚落地的记录 id。
+  ///
+  /// 飞入动画已经替它做过一次"登场"，列表接手后不能再播一遍入场动画，
+  /// 否则会看到卡片落地后又淡入下滑一次。
+  int? _landedId;
 
   /// "指令完整"状态的呼吸动画：徽章脉动与发送按钮光晕共用同一节奏，
   /// 使两者在同一拍上，不会各跳各的。
@@ -71,6 +110,10 @@ class _CommandConsolePageState extends State<CommandConsolePage>
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
+    // 动画一停就把替身卡片摘掉，换成列表里的真卡片
+    _fly.addStatusListener((status) {
+      if (status == AnimationStatus.completed) _finishFlyIn();
+    });
     _analyzeNow();
     mc.listCommands().then((cmds) {
       if (mounted) setState(() => _allCommands = cmds);
@@ -81,6 +124,7 @@ class _CommandConsolePageState extends State<CommandConsolePage>
   void dispose() {
     _debounce?.cancel();
     _pulse.dispose();
+    _fly.dispose();
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focusNode.dispose();
@@ -202,8 +246,12 @@ class _CommandConsolePageState extends State<CommandConsolePage>
     if (input.isEmpty) return;
     final r = await mc.execute(input: input);
     if (!mounted) return;
+    // 先给手感反馈：视觉上的飞入动画要 460ms 才落地，震动是第一时间的回应
+    _vibrate(success: r.success);
     // 交给共享控制器：它会通知两个页面，并按设置决定是否落盘
     context.history.add(input, r.success, r.message);
+    // 这条新记录从输入框飞进列表顶部
+    _startFlyIn();
     GlassToast.show(
       context,
       message: r.message,
@@ -214,6 +262,112 @@ class _CommandConsolePageState extends State<CommandConsolePage>
       _controller.clear();
       _analyzeNow();
     }
+  }
+
+  /// 执行指令后震一下：成功轻、失败重一档——失败更需要被注意到。
+  ///
+  /// 只在移动端调。桌面端没有振动马达，走平台通道只会抛
+  /// MissingPluginException；另外 haptic 本身就是系统的"触感反馈"，
+  /// 用户在系统里关掉后自然不会响，所以不必再给一个应用内开关。
+  void _vibrate({required bool success}) {
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+      case TargetPlatform.iOS:
+        break;
+      default:
+        return;
+    }
+    final feedback = success
+        ? HapticFeedback.lightImpact()
+        : HapticFeedback.mediumImpact();
+    // 反馈失败不该影响指令执行，异常吞掉
+    unawaited(
+      feedback.catchError((Object _) {
+        // 忽略：拿不到振动能力就算了
+      }),
+    );
+  }
+
+  /// 新记录从输入框飞进列表顶部。
+  ///
+  /// 做法不是"先把卡片插进去再挪位置"——那样列表会先跳一下。而是：
+  ///
+  /// 1. 新记录照常进列表，但列表第一条先渲染成 [_FlyingSlot]：一段 0 高的
+  ///    空位，外加一份 `Offstage` 的真卡片。空位不占高度，因此这一帧的布局
+  ///    与插入前完全一致，不会闪；
+  /// 2. 这一帧结束后量出那份离屏卡片的位置与自然高度——那就是落点；
+  /// 3. 空位与替身卡片一起按 [_kFlyCurve] 推进：空位涨高，把下面的记录顶着
+  ///    往下平移；替身卡片从输入框上边缘升到落点；
+  /// 4. 动画结束换成列表里的真卡片：高度和位置都是量出来的，切换看不出来。
+  ///
+  /// 列表不在顶部时不飞——落点在可视区之外，替身卡片会飞到页头上方去。这时
+  /// 直接退化成原来的入场动画（判定放在 [_launchFlyIn] 里：第一次执行指令时
+  /// 列表刚由空态变成有内容，这里还拿不到滚动控制器）。
+  void _startFlyIn() {
+    final history = context.history;
+    final page = context.findRenderObject() as RenderBox?;
+    final inputBox = _inputKey.currentContext?.findRenderObject() as RenderBox?;
+    if (history.isEmpty ||
+        page == null ||
+        inputBox == null ||
+        !inputBox.hasSize ||
+        _reduceMotion()) {
+      return;
+    }
+
+    // 上一条还没落地就又执行了一条：先把上一次结掉（它的卡片此刻已经排到
+    // 第二位，按满高画出来即可），再让新的一条起飞。
+    final aborted = _flying;
+    _fly.stop();
+    setState(() {
+      if (aborted != null) _landedId = aborted.id;
+      _flying = history.items.first;
+      _flyStartY = page.globalToLocal(inputBox.localToGlobal(Offset.zero)).dy;
+      _flyDest = null;
+    });
+    _fly.value = 0;
+    // 等这一帧把离屏卡片布局完，才量得到落点
+    WidgetsBinding.instance.addPostFrameCallback((_) => _launchFlyIn());
+  }
+
+  /// 量出落点，然后起飞。
+  void _launchFlyIn() {
+    if (!mounted || _flying == null) return;
+    final page = context.findRenderObject() as RenderBox?;
+    final card =
+        _flyingCardKey.currentContext?.findRenderObject() as RenderBox?;
+    // 列表已经滚下去了、或者量不到卡片（极端布局）：放弃飞入，退回入场动画
+    final noLandingSpot =
+        !_scrollController.hasClients ||
+        _scrollController.offset > 0.5 ||
+        page == null ||
+        card == null ||
+        !card.hasSize ||
+        card.size.isEmpty;
+    if (noLandingSpot) {
+      _finishFlyIn(landed: false);
+      return;
+    }
+    setState(() {
+      _flyDest =
+          page.globalToLocal(card.localToGlobal(Offset.zero)) & card.size;
+    });
+    _fly.forward();
+  }
+
+  /// 摘掉替身卡片，把列表里的真卡片放出来。
+  ///
+  /// [landed] 为 false 表示这次飞入没飞成：真卡片按普通入场动画登场，
+  /// 所以不记 [_landedId]（那条记录还有一次入场动画的名额没用）。
+  void _finishFlyIn({bool landed = true}) {
+    if (!mounted || _flying == null) return;
+    final id = _flying!.id;
+    setState(() {
+      if (landed) _landedId = id;
+      _flying = null;
+      _flyStartY = null;
+      _flyDest = null;
+    });
   }
 
   /// 点击左上角图标：显示软件信息与操作说明
@@ -257,13 +411,53 @@ class _CommandConsolePageState extends State<CommandConsolePage>
     // bottom 交给外壳处理——底部是浮动的玻璃导航栏。
     return SafeArea(
       bottom: false,
-      child: Column(
+      child: Stack(
         children: <Widget>[
-          _buildHeader(),
-          Expanded(child: _buildHistory()),
-          _buildBottomPanel(),
+          Column(
+            children: <Widget>[
+              _buildHeader(),
+              Expanded(child: _buildHistory()),
+              _buildBottomPanel(),
+            ],
+          ),
+          // 飞入途中的替身卡片：叠在整页之上，才能盖着输入面板一路升到列表顶部
+          _buildFlyingCard(),
         ],
       ),
+    );
+  }
+
+  /// 飞入动画里的替身卡片；没有动画在跑时是个零尺寸占位。
+  ///
+  /// 位置只走布局（`Positioned`），尺寸在飞行过程中不变——不对玻璃做
+  /// Transform / Opacity，那会打乱 backdrop 采样（见 [_HistoryCard] 的说明）。
+  Widget _buildFlyingCard() {
+    final entry = _flying;
+    final dest = _flyDest;
+    final startY = _flyStartY;
+    if (entry == null || dest == null || startY == null) {
+      return const SizedBox.shrink();
+    }
+    return AnimatedBuilder(
+      animation: _fly,
+      // 替身卡片作为 child 传进来：每帧只重建外面这层 Positioned，
+      // 里面的玻璃卡片不跟着重建（一帧几十次重建玻璃面板是白烧性能）
+      child: IgnorePointer(child: _GhostCard(entry: entry)),
+      builder: (context, child) {
+        final t = _kFlyCurve.transform(_fly.value);
+        // 起点贴着输入框上边缘，水平方向已经与落点对齐，所以整段动画就是
+        // 一次"向上升起 + 落位"；终点与列表里真卡片的矩形重合。
+        final from = startY - dest.height;
+        return Positioned.fromRect(
+          rect: Rect.fromLTWH(
+            dest.left,
+            from + (dest.top - from) * t,
+            dest.width,
+            dest.height,
+          ),
+          child: child!,
+        );
+      },
     );
   }
 
@@ -277,7 +471,7 @@ class _CommandConsolePageState extends State<CommandConsolePage>
         children: <Widget>[
           InkWell(
             onTap: _showAboutDialog,
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(context.radius(14)),
             splashColor: palette.accent.withValues(alpha: 0.10),
             highlightColor: palette.accent.withValues(alpha: 0.06),
             child: Padding(
@@ -351,6 +545,25 @@ class _CommandConsolePageState extends State<CommandConsolePage>
       itemCount: items.length,
       itemBuilder: (ctx, i) {
         final h = items[i];
+
+        // 正在飞入的那条：列表里先摆一段会涨高的空位，外加一份离屏布局的
+        // 真卡片（`Offstage` 不绘制，只用来量落点见 [_launchFlyIn]）。
+        // 空位涨高把下面的记录顶着往下平移，替身卡片则飞来填进这段空位。
+        if (i == 0 && _flying != null && h.id == _flying!.id) {
+          return _FlyingSlot(
+            animation: _fly,
+            height: _flyDest?.height ?? 0,
+            child: Offstage(
+              offstage: true,
+              child: _HistoryCard(
+                key: _flyingCardKey,
+                entry: h,
+                animate: false,
+              ),
+            ),
+          );
+        }
+
         // Key 用自增 id：新记录插入时它在 index 0 上"首次出现"而播放入场动画，
         // 已有记录随 index 下移时 element/State 被复用，动画不会重播。
         //
@@ -359,7 +572,8 @@ class _CommandConsolePageState extends State<CommandConsolePage>
         return _HistoryCard(
           key: ValueKey<int>(h.id),
           entry: h,
-          animate: history.takeEntranceAnimation(h.id),
+          // 刚飞进来的那条已经飞过了，不能再播一次入场动画（见 [_landedId]）
+          animate: history.takeEntranceAnimation(h.id) && h.id != _landedId,
         );
       },
     );
@@ -388,7 +602,7 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                   scale: 1 + 0.22 * v,
                   child: DecoratedBox(
                     decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(context.radius(8)),
                       border: Border.all(
                         color: accent.withValues(
                           alpha: _complete ? 0.45 * (1 - v) : 0,
@@ -411,7 +625,7 @@ class _CommandConsolePageState extends State<CommandConsolePage>
           color: _complete
               ? context.palette.accentTint
               : context.palette.accentTint,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(context.radius(8)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -518,9 +732,11 @@ class _CommandConsolePageState extends State<CommandConsolePage>
           // 补全建议
           if (_suggestions.isNotEmpty)
             Container(
-              // 候选不再限制条数（物品有上千条），这里给一个更高的可视区，
-              // 列表本身可滚动。
-              constraints: const BoxConstraints(maxHeight: 224),
+              // 候选不再限制条数（物品有上千条），可视区多高由设置里的
+              // 「提示框高度」决定；列表本身可滚动，露不下的部分滚出来。
+              constraints: BoxConstraints(
+                maxHeight: context.appSettings.suggestionPanelHeight,
+              ),
               margin: const EdgeInsets.only(top: 8),
               // 候选项入场是"从下方滑进来"，首尾两项的滑动会越出这块圆角容器
               // （Container 默认不裁剪），看上去就成了文字压在边框上。裁进圆角里。
@@ -529,7 +745,7 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                 color: context.palette.isDark
                     ? const Color(0x14101418)
                     : const Color(0x0A000000),
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(context.radius(12)),
                 border: Border.all(
                   color: context.palette.textMuted.withValues(alpha: 0.18),
                 ),
@@ -583,11 +799,17 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                     return KeyEventResult.ignored;
                   },
                   child: GlassTextField(
+                    // 飞入动画从输入框的位置起飞
+                    key: _inputKey,
                     controller: _controller,
                     focusNode: _focusNode,
                     // 开自己的图层：premium 需要有几何信息可捕获，见 glass.dart
                     quality: context.glassQuality,
                     useOwnLayer: true,
+                    // 形状照库的默认（圆角 10），只是跟着全局圆角系数缩放
+                    shape: LiquidRoundedRectangle(
+                      borderRadius: context.radius(10),
+                    ),
                     placeholder: '输入 / 开头的指令…',
                     placeholderStyle: TextStyle(
                       color: context.palette.textMuted,
@@ -598,9 +820,10 @@ class _CommandConsolePageState extends State<CommandConsolePage>
                       fontFamily: 'monospace',
                       fontSize: 14,
                     ),
-                    // 内容折行时自动长高，最多 5 行，再多就在内部滚动
+                    // 内容折行时自动长高；上限由设置里的「输入框最大高度」
+                    // 决定，长到头之后改为在输入框内部滚动
                     minLines: 1,
-                    maxLines: 5,
+                    maxLines: context.appSettings.inputMaxLines,
                     keyboardType: TextInputType.multiline,
                     // 用 send 而不是 newline：回车执行指令，而不是插入换行
                     textInputAction: TextInputAction.send,
@@ -783,7 +1006,7 @@ class _StepRow extends StatelessWidget {
             margin: const EdgeInsets.only(top: 1),
             decoration: BoxDecoration(
               color: context.palette.accentTint,
-              borderRadius: BorderRadius.circular(5),
+              borderRadius: BorderRadius.circular(context.radius(5)),
             ),
             alignment: Alignment.center,
             child: Text(
@@ -928,6 +1151,7 @@ class _AboutDialogAction extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final radius = context.radius(14);
     final label = Text(
       '知道了',
       textAlign: TextAlign.center,
@@ -943,13 +1167,13 @@ class _AboutDialogAction extends StatelessWidget {
         type: MaterialType.transparency,
         child: InkWell(
           onTap: onPressed,
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(radius),
           child: Container(
             height: 44,
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: palette.accentHighlight,
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(radius),
             ),
             child: label,
           ),
@@ -962,7 +1186,7 @@ class _AboutDialogAction extends StatelessWidget {
       height: 44,
       quality: quality,
       useOwnLayer: true,
-      shape: const LiquidRoundedSuperellipse(borderRadius: 14),
+      shape: LiquidRoundedSuperellipse(borderRadius: radius),
       glowColor: palette.accent.withValues(alpha: 0.30),
       // 关掉"按住拖动会拉长"的果冻手感：premium 档下玻璃的边是烘在缓存纹理
       // 里的，缩放那层纹理会把边框拉糊（库注释里承认的 Impeller 限制）
@@ -1060,15 +1284,16 @@ class _SuggestionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final radius = context.radius(8);
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(radius),
       child: AnimatedContainer(
         duration: _transition,
         curve: Curves.easeOutCubic,
         decoration: BoxDecoration(
           color: active ? context.palette.accentHighlight : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(radius),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 12),
         child: Row(
@@ -1123,12 +1348,15 @@ class _SuggestionTile extends StatelessWidget {
 }
 
 /// 历史记录卡片：新记录插入时淡入，并自上而下滑入。
+///
+/// 如果它走的是飞入动画（见 [_startFlyIn]），[animate] 会传 false ——
+/// 那一次"登场"已经由替身卡片飞完了，落地后再播一遍就重复了。
 class _HistoryCard extends StatefulWidget {
   const _HistoryCard({super.key, required this.entry, required this.animate});
 
   final HistoryRecord entry;
 
-  /// 是否播放入场动画（只在该记录首次出现时为 true）
+  /// 是否播放入场动画（只在该记录首次出现、且不是飞入进来的那条时为 true）
   final bool animate;
 
   @override
@@ -1166,14 +1394,16 @@ class _HistoryCardState extends State<_HistoryCard>
 
   @override
   Widget build(BuildContext context) {
-    final h = widget.entry;
-    // 关键：动画只能包在卡片的**内容**上，不能包住 [GlassCard] 本身。
+    // 关键：动画只能包在卡片的**内容**上，不能包住面板（玻璃）本身。
     //
     // 玻璃效果依赖 BackdropFilter 与共享的合成层，外层再叠一层
     // Opacity（FadeTransition）/ Transform（SlideTransition）会打乱它的
     // backdrop 采样，构建时直接断言失败（红屏）。
     // 而历史列表在执行第一条指令之前是空的，所以只有"执行指令后"才会
     // 第一次构建出这张卡片——故障时机正好吻合。
+    //
+    // 飞入动画里那张替身卡片守的是同一条规矩：只改位置（走布局），
+    // 不对玻璃做 Transform / Opacity（见 [_GhostCard]）。
     return QualityPanel(
       radius: 12,
       padding: const EdgeInsets.all(16),
@@ -1188,22 +1418,45 @@ class _HistoryCardState extends State<_HistoryCard>
             begin: const Offset(0, -0.25),
             end: Offset.zero,
           ).animate(_curve),
-          child: Row(
+          child: _HistoryEntryBody(entry: widget.entry),
+        ),
+      ),
+    );
+  }
+}
+
+/// 一条历史记录的内容（状态图标 + 指令原文 + 执行结果）。
+///
+/// 抽出来是为了让列表里的真卡片与飞入途中的替身卡片用同一份内容：
+/// 两者尺寸一致，落位时的替换才看不出来。
+class _HistoryEntryBody extends StatelessWidget {
+  const _HistoryEntryBody({required this.entry});
+
+  final HistoryRecord entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = entry;
+    final stamp = h.createdAt;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          h.success ? Icons.check_circle : Icons.error,
+          color: h.success ? context.palette.accent : context.palette.errorIcon,
+          size: 20,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                h.success ? Icons.check_circle : Icons.error,
-                color: h.success
-                    ? context.palette.accent
-                    : context.palette.errorIcon,
-                size: 20,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Expanded(
+                    child: Text(
                       h.command,
                       style: TextStyle(
                         color: context.palette.textPrimary,
@@ -1212,28 +1465,110 @@ class _HistoryCardState extends State<_HistoryCard>
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: 3),
-                    // 执行结果用"旁白"字体：斜体、色调更淡、行距略松，
-                    // 与上面等宽正体的指令原文形成对照。
+                  ),
+                  // 时间靠右对齐，与指令原文同一行；老存档没有时间就不占位
+                  if (stamp != null) ...<Widget>[
+                    const SizedBox(width: 8),
                     Text(
-                      h.message,
+                      formatHistoryTime(stamp, DateTime.now()),
                       style: TextStyle(
-                        color: h.success
-                            ? context.palette.textTertiary
-                            : context.palette.errorText,
-                        fontSize: 12,
-                        fontStyle: FontStyle.italic,
-                        height: 1.5,
-                        letterSpacing: 0.15,
+                        color: context.palette.textMuted,
+                        fontSize: 11,
+                        // 等宽数字：列表滚动/刷新时读数不会左右抖
+                        fontFeatures: const <FontFeature>[
+                          FontFeature.tabularFigures(),
+                        ],
                       ),
                     ),
                   ],
+                ],
+              ),
+              const SizedBox(height: 3),
+              // 执行结果用"旁白"字体：斜体、色调更淡、行距略松，
+              // 与上面等宽正体的指令原文形成对照。
+              Text(
+                h.message,
+                style: TextStyle(
+                  color: h.success
+                      ? context.palette.textTertiary
+                      : context.palette.errorText,
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                  height: 1.5,
+                  letterSpacing: 0.15,
                 ),
               ),
             ],
           ),
         ),
+      ],
+    );
+  }
+}
+
+/// 飞入期间列表最前面那段"让位"的空位。
+///
+/// 只涨高、不绘制任何东西：由它把下面的记录顶着往下平移。涨高与卡片飞行
+/// 共用 [_kFlyCurve]，所以两边同时到位。
+///
+/// [child] 是一份离屏布局的真卡片（`Offstage`，不绘制），只用来量落点。
+class _FlyingSlot extends StatelessWidget {
+  const _FlyingSlot({
+    required this.animation,
+    required this.height,
+    required this.child,
+  });
+
+  final Animation<double> animation;
+
+  /// 落点卡片的高度；量到之前传 0，空位就先不撑开
+  final double height;
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: animation,
+      // child 作为参数传进来，每帧只重建这层薄壳，里面的玻璃卡片不重建
+      child: child,
+      builder: (context, child) => Column(
+        mainAxisSize: MainAxisSize.min,
+        // 撑满宽度：里面的离屏卡片要与列表里的真卡片拿到同样的宽度约束，
+        // 量出来的高度才一致
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          SizedBox(height: height * _kFlyCurve.transform(animation.value)),
+          child!,
+        ],
       ),
+    );
+  }
+}
+
+/// 飞入途中那张"替身"卡片。
+///
+/// 结构与列表里的真卡片完全一致（同样的外边距、圆角、内边距与内容），
+/// 落位那一刻换成真卡片，位置与尺寸都对得上，看不出替换。
+///
+/// 飞行中只改它的位置（`Positioned` 走布局），尺寸保持不变——不对玻璃做
+/// Transform / Opacity，那会打乱 backdrop 采样（见 [_HistoryCard] 的说明）。
+class _GhostCard extends StatelessWidget {
+  const _GhostCard({required this.entry});
+
+  final HistoryRecord entry;
+
+  @override
+  Widget build(BuildContext context) {
+    return QualityPanel(
+      radius: 12,
+      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.symmetric(vertical: 5),
+      // 与列表里的卡片同一档：都走实时着色器，替换的那一帧不会有没画出来的空档
+      capQuality: GlassQuality.standard,
+      // 光球是绕着面板跑的装饰，飞行途中加进来只是多一层动画
+      showOrbit: false,
+      child: _HistoryEntryBody(entry: entry),
     );
   }
 }

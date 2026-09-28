@@ -1,11 +1,38 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 
 import 'app_palette.dart';
 import 'app_settings.dart';
 import 'app_shell.dart';
 import 'src/rust/frb_generated.dart';
+
+/// 与 Windows runner 之间的通道。
+///
+/// 标题栏是**原生**绘制的，Flutter 改不到它。runner 里默认按注册表（系统
+/// 偏好）设深浅，于是应用内选"深色"而系统是浅色时，标题栏会和界面反着来。
+/// 这里把应用内算出来的明暗推给 runner（见 windows/runner/flutter_window.cpp）。
+const MethodChannel _windowChannel = MethodChannel('minecraftcommand/window');
+
+/// 通知 runner 切换标题栏明暗。
+///
+/// 只在 Windows 上调；其它平台的标题栏由各自的宿主负责，通道也没实现。
+void _syncTitleBarDark(bool isDark) {
+  if (defaultTargetPlatform != TargetPlatform.windows) return;
+  unawaited(
+    _windowChannel.invokeMethod<void>('setDarkTitleBar', isDark).onError((
+      Object error,
+      StackTrace _,
+    ) {
+      // runner 还没实现这个通道时（旧 exe 配新界面）忽略即可
+      debugPrint('标题栏明暗同步失败：$error');
+    }),
+  );
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -66,6 +93,12 @@ class _MinecraftCommandAppState extends State<MinecraftCommandApp>
     widget.initialSettings,
   );
 
+  /// 上一次推给标题栏的明暗；null = 还没推过。
+  ///
+  /// 下面是在 build 里顺手同步的（明暗就是在这里算出来的），这个字段保证
+  /// 一次变化只发一次平台调用，而不是每帧都发。
+  bool? _titleBarDark;
+
   @override
   void initState() {
     super.initState();
@@ -97,6 +130,12 @@ class _MinecraftCommandAppState extends State<MinecraftCommandApp>
         final isDark = settings.brightnessMode.resolve(systemIsDark);
         final accent = accentById(settings.accentId).color;
 
+        // 系统标题栏也跟着应用内的明暗走（只在 Windows 上真的会发出去）
+        if (_titleBarDark != isDark) {
+          _titleBarDark = isDark;
+          _syncTitleBarDark(isDark);
+        }
+
         return AppSettingsScope(
           controller: _settings,
           child: LiquidGlassWidgets.wrap(
@@ -104,6 +143,15 @@ class _MinecraftCommandAppState extends State<MinecraftCommandApp>
             // 各组件通过 `context.glassQuality` 读取，改一档全界面立即生效。
             // 这里保留自适应开关，库内部还有一层兜底判断。
             adaptiveQuality: true,
+            // 玻璃质感（厚度/模糊/色散）走库的主题覆盖：设置里没暴露的字段
+            // （染色、高光角度…）会继续用各组件自己的默认值。
+            //
+            // 亮暗两套给同一份取值——滑块的语义是"玻璃有多厚"，不该随明暗跳；
+            // 真正需要跟着明暗变的是主题色和文字色阶（见 app_palette.dart）。
+            theme: GlassThemeData(
+              light: GlassThemeVariant(settings: settings.glassSettings),
+              dark: GlassThemeVariant(settings: settings.glassSettings),
+            ),
             // wrap 挂在 MaterialApp 之上，`Theme.maybeBrightnessOf` 在这里拿不到，
             // 所以直接把算好的明暗喂给它，玻璃才能跟着切深浅。
             brightnessResolver: (_) =>

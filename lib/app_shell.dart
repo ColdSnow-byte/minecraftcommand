@@ -169,6 +169,9 @@ class _SwitcherTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    // 22.5 = 标签高度的一半（原本是个胶囊）；跟着全局圆角一起缩，
+    // 缩小时与轨道的圆角才配得上
+    final radius = context.radius(22.5);
 
     return Semantics(
       label: semanticLabel,
@@ -178,7 +181,7 @@ class _SwitcherTab extends StatelessWidget {
         message: semanticLabel,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(22.5),
+          borderRadius: BorderRadius.circular(radius),
           splashColor: palette.accent.withValues(alpha: 0.12),
           highlightColor: palette.accent.withValues(alpha: 0.06),
           child: AnimatedContainer(
@@ -188,7 +191,7 @@ class _SwitcherTab extends StatelessWidget {
             height: _GlassSectionSwitcher.tabHeight,
             decoration: BoxDecoration(
               color: selected ? palette.accentHighlight : Colors.transparent,
-              borderRadius: BorderRadius.circular(22.5),
+              borderRadius: BorderRadius.circular(radius),
             ),
             child: AnimatedSwitcher(
               duration: _duration,

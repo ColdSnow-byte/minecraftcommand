@@ -39,6 +39,64 @@ enum AppBrightnessMode {
 /// `copyWith` 用它区分"没传这个参数"和"显式传了 null"。
 const Object _unset = Object();
 
+// ─────────────────────────── 控制台尺寸 ───────────────────────────
+
+/// 底部提示框（补全候选列表）的可选高度范围与步进，单位逻辑像素。
+///
+/// 步进取 32——正好是单个候选的高度（见 command_console.dart 的
+/// `_kSuggestionExtent`）：每一档露出的候选条数都是整数，不会切出半条。
+const double kSuggestionPanelHeightMin = 96;
+const double kSuggestionPanelHeightMax = 320;
+const double kSuggestionPanelHeightStep = 32;
+
+/// 输入框最多长到几行，超过之后改为在输入框内部滚动。
+///
+/// 这里用"行数"而不是像素高度：[GlassTextField] 的高度约束是加在整块玻璃
+/// **外面**的（见它的 `_wrapWithConstraints`），按像素卡住而内部换行数更多时，
+/// 内容会直接溢出被裁掉；行数是它自己支持的、不会出问题的那个维度。
+const int kInputMaxLinesMin = 1;
+const int kInputMaxLinesMax = 10;
+
+// ─────────────────────────── 圆角与玻璃质感 ───────────────────────────
+
+/// 全局圆角系数：所有面板/控件自己的圆角都乘它。
+///
+/// 用**系数**而不是一个统一半径，是为了保住各层级之间的圆角关系——
+/// 卡片 12、面板 24、切换器 27 是设计上分好的，统一成一个值反而更糟。
+const double kRadiusScaleMin = 0.5;
+const double kRadiusScaleMax = 1.5;
+const double kRadiusScaleStep = 0.05;
+
+/// 玻璃厚度（[LiquidGlassSettings.thickness] 的量纲，默认 20）。
+///
+/// 越大折射越"厚"，边缘的位移感越强；0 就只剩一层模糊染色。
+const double kGlassThicknessMin = 0;
+const double kGlassThicknessMax = 60;
+const double kGlassThicknessStep = 5;
+
+/// 玻璃模糊半径（[LiquidGlassSettings.blur]，默认 5）。
+///
+/// 这一档所有质量等级（含标准档的实时着色器）都吃，桌面端也有效果。
+const double kGlassBlurMin = 0;
+const double kGlassBlurMax = 20;
+const double kGlassBlurStep = 1;
+
+/// 色散强度（[LiquidGlassSettings.chromaticAberration]，默认 0.01）。
+///
+/// 就是边缘那圈彩虹边；0.08 已经相当夸张，所以上限压在 0.08。
+const double kGlassDispersionMin = 0;
+const double kGlassDispersionMax = 0.08;
+const double kGlassDispersionStep = 0.01;
+
+/// 解析一个数值项：类型不符回落到默认值，越界夹回可选范围。
+///
+/// 直接 `as num` 会在类型不符时抛 TypeError，把整份设置读废（见 [AppSettings.fromJson]）。
+double _doubleInRange(Object? raw, double fallback, double min, double max) =>
+    raw is num ? raw.toDouble().clamp(min, max).toDouble() : fallback;
+
+int _intInRange(Object? raw, int fallback, int min, int max) =>
+    raw is num ? raw.toInt().clamp(min, max).toInt() : fallback;
+
 /// 一份完整的用户设置。
 ///
 /// 全部字段都有默认值，所以旧版本存下来的 JSON 缺字段时也能正常读出来
@@ -54,6 +112,12 @@ class AppSettings {
     this.backgroundImagePath,
     this.backgroundBlur = 0.32,
     this.backgroundDim = 0.55,
+    this.suggestionPanelHeight = 224,
+    this.inputMaxLines = 5,
+    this.radiusScale = 1,
+    this.glassThickness = 20,
+    this.glassBlur = 5,
+    this.glassDispersion = 0.01,
   });
 
   final AppBrightnessMode brightnessMode;
@@ -85,6 +149,40 @@ class AppSettings {
   /// 背景图压暗/冲淡强度，0（原图）..1（几乎盖住）
   final double backgroundDim;
 
+  /// 底部提示框（补全候选列表）最多显示多高，单位逻辑像素。
+  ///
+  /// 列表本身可滚动，调小只是少露几条，不会丢内容。
+  final double suggestionPanelHeight;
+
+  /// 输入框最多长到几行；再长就在输入框内部滚动。
+  final int inputMaxLines;
+
+  /// 全局圆角系数，[kRadiusScaleMin]..[kRadiusScaleMax]。
+  ///
+  /// 各控件自己的圆角都乘它（见 `context.radius`），所以调小是整体变方正、
+  /// 调大是整体变圆润，层级关系不变。
+  final double radiusScale;
+
+  /// 玻璃厚度（越大折射越"厚"）
+  final double glassThickness;
+
+  /// 玻璃模糊半径
+  final double glassBlur;
+
+  /// 边缘色散（彩虹边）强度
+  final double glassDispersion;
+
+  /// 玻璃质感滑块的取值 → 库里那套视觉参数。
+  ///
+  /// 用 [GlassThemeSettings]（部分覆盖）而不是完整的 [LiquidGlassSettings]：
+  /// 设置里没暴露的字段（染色、高光角度、饱和度…）继续走各组件自己的默认值，
+  /// 不会被我们顺手清零。
+  GlassThemeSettings get glassSettings => GlassThemeSettings(
+    thickness: glassThickness,
+    blur: glassBlur,
+    chromaticAberration: glassDispersion,
+  );
+
   /// 模糊滑块 → 高斯 sigma。上限 36 是肉眼几乎只剩色块的程度。
   double get blurSigma => backgroundBlur * 36;
 
@@ -100,6 +198,12 @@ class AppSettings {
     Object? backgroundImagePath = _unset,
     double? backgroundBlur,
     double? backgroundDim,
+    double? suggestionPanelHeight,
+    int? inputMaxLines,
+    double? radiusScale,
+    double? glassThickness,
+    double? glassBlur,
+    double? glassDispersion,
   }) {
     return AppSettings(
       brightnessMode: brightnessMode ?? this.brightnessMode,
@@ -112,6 +216,13 @@ class AppSettings {
           : backgroundImagePath as String?,
       backgroundBlur: backgroundBlur ?? this.backgroundBlur,
       backgroundDim: backgroundDim ?? this.backgroundDim,
+      suggestionPanelHeight:
+          suggestionPanelHeight ?? this.suggestionPanelHeight,
+      inputMaxLines: inputMaxLines ?? this.inputMaxLines,
+      radiusScale: radiusScale ?? this.radiusScale,
+      glassThickness: glassThickness ?? this.glassThickness,
+      glassBlur: glassBlur ?? this.glassBlur,
+      glassDispersion: glassDispersion ?? this.glassDispersion,
     );
   }
 
@@ -124,6 +235,12 @@ class AppSettings {
     'bg': backgroundImagePath,
     'blur': backgroundBlur,
     'dim': backgroundDim,
+    'suggestH': suggestionPanelHeight,
+    'inputLines': inputMaxLines,
+    'radius': radiusScale,
+    'gThickness': glassThickness,
+    'gBlur': glassBlur,
+    'gDispersion': glassDispersion,
   };
 
   /// 宽容解析：任何一项坏了都只丢那一项，不至于把整份设置重置。
@@ -158,6 +275,43 @@ class AppSettings {
       backgroundDim: json['dim'] is num
           ? (json['dim'] as num).toDouble()
           : fallback.backgroundDim,
+      // 尺寸项多一步夹取：类型对但值离谱（存档被手改过）时也不能让布局炸掉
+      suggestionPanelHeight: _doubleInRange(
+        json['suggestH'],
+        fallback.suggestionPanelHeight,
+        kSuggestionPanelHeightMin,
+        kSuggestionPanelHeightMax,
+      ),
+      inputMaxLines: _intInRange(
+        json['inputLines'],
+        fallback.inputMaxLines,
+        kInputMaxLinesMin,
+        kInputMaxLinesMax,
+      ),
+      radiusScale: _doubleInRange(
+        json['radius'],
+        fallback.radiusScale,
+        kRadiusScaleMin,
+        kRadiusScaleMax,
+      ),
+      glassThickness: _doubleInRange(
+        json['gThickness'],
+        fallback.glassThickness,
+        kGlassThicknessMin,
+        kGlassThicknessMax,
+      ),
+      glassBlur: _doubleInRange(
+        json['gBlur'],
+        fallback.glassBlur,
+        kGlassBlurMin,
+        kGlassBlurMax,
+      ),
+      glassDispersion: _doubleInRange(
+        json['gDispersion'],
+        fallback.glassDispersion,
+        kGlassDispersionMin,
+        kGlassDispersionMax,
+      ),
     );
   }
 
@@ -171,7 +325,13 @@ class AppSettings {
       other.persistHistory == persistHistory &&
       other.backgroundImagePath == backgroundImagePath &&
       other.backgroundBlur == backgroundBlur &&
-      other.backgroundDim == backgroundDim;
+      other.backgroundDim == backgroundDim &&
+      other.suggestionPanelHeight == suggestionPanelHeight &&
+      other.inputMaxLines == inputMaxLines &&
+      other.radiusScale == radiusScale &&
+      other.glassThickness == glassThickness &&
+      other.glassBlur == glassBlur &&
+      other.glassDispersion == glassDispersion;
 
   @override
   int get hashCode => Object.hash(
@@ -183,6 +343,12 @@ class AppSettings {
     backgroundImagePath,
     backgroundBlur,
     backgroundDim,
+    suggestionPanelHeight,
+    inputMaxLines,
+    radiusScale,
+    glassThickness,
+    glassBlur,
+    glassDispersion,
   );
 }
 
@@ -319,6 +485,49 @@ class AppSettingsController extends ChangeNotifier {
 
   void setBackgroundDim(double value) =>
       update(_settings.copyWith(backgroundDim: value));
+
+  /// 滑块数值先夹进可选范围：拖到两端之外（或滚轮微调）也不会越界。
+  void setSuggestionPanelHeight(double value) => update(
+    _settings.copyWith(
+      suggestionPanelHeight: value
+          .clamp(kSuggestionPanelHeightMin, kSuggestionPanelHeightMax)
+          .toDouble(),
+    ),
+  );
+
+  void setInputMaxLines(int value) => update(
+    _settings.copyWith(
+      inputMaxLines: value.clamp(kInputMaxLinesMin, kInputMaxLinesMax).toInt(),
+    ),
+  );
+
+  void setRadiusScale(double value) => update(
+    _settings.copyWith(
+      radiusScale: value.clamp(kRadiusScaleMin, kRadiusScaleMax).toDouble(),
+    ),
+  );
+
+  void setGlassThickness(double value) => update(
+    _settings.copyWith(
+      glassThickness: value
+          .clamp(kGlassThicknessMin, kGlassThicknessMax)
+          .toDouble(),
+    ),
+  );
+
+  void setGlassBlur(double value) => update(
+    _settings.copyWith(
+      glassBlur: value.clamp(kGlassBlurMin, kGlassBlurMax).toDouble(),
+    ),
+  );
+
+  void setGlassDispersion(double value) => update(
+    _settings.copyWith(
+      glassDispersion: value
+          .clamp(kGlassDispersionMin, kGlassDispersionMax)
+          .toDouble(),
+    ),
+  );
 }
 
 /// 把 [AppSettingsController] 注入组件树。
@@ -363,4 +572,14 @@ extension AppSettingsContext on BuildContext {
   ///
   /// 「纯色」档为 false——那时面板会换成普通的圆角色块。
   bool get glassEnabled => usesGlass(appSettings.glassQualityMode);
+
+  /// 全局圆角系数（见 [AppSettings.radiusScale]）。
+  double get radiusScale => appSettings.radiusScale;
+
+  /// 按全局系数缩放一个圆角半径。
+  ///
+  /// 各处写自己设计好的基准值（卡片 12、面板 24、切换器 27…），
+  /// 由它统一乘系数——这样调"圆角"滑块时层级关系保持不变：
+  /// 调小是整体变方正，调大是整体变圆润，而不是全部压成同一个值。
+  double radius(double base) => base * radiusScale;
 }

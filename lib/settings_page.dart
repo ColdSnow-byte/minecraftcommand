@@ -97,11 +97,114 @@ class SettingsPage extends StatelessWidget {
               onSelect: app.setGlassQualityMode,
             ),
             _HairLine(),
+            _SliderRow(
+              title: '圆角',
+              value: settings.radiusScale,
+              min: kRadiusScaleMin,
+              max: kRadiusScaleMax,
+              divisions:
+                  ((kRadiusScaleMax - kRadiusScaleMin) / kRadiusScaleStep)
+                      .round(),
+              format: (value) => '${value.toStringAsFixed(2)}×',
+              onChanged: app.setRadiusScale,
+            ),
+            Text(
+              '所有面板与控件一起缩放：往左方正，往右圆润',
+              style: TextStyle(color: palette.textMuted, fontSize: 11),
+            ),
+            _HairLine(),
             _SwitchRow(
               title: '光球环绕',
               subtitle: '在每个面板的边缘绕行一颗拖尾光球',
               value: settings.orbitEnabled,
               onChanged: app.setOrbitEnabled,
+            ),
+          ],
+        ),
+
+        // ─────────── 玻璃质感 ───────────
+        _SectionCard(
+          title: '玻璃质感',
+          icon: Icons.blur_on_rounded,
+          children: <Widget>[
+            Text(
+              '调的是玻璃本身：厚度=折射的"厚"度，模糊=透过它看背景的虚化，'
+              '色散=边缘那圈彩虹边。选「极低」质量档时没有玻璃，这几项不起作用。',
+              style: TextStyle(color: palette.textMuted, fontSize: 11),
+            ),
+            const SizedBox(height: 10),
+            _SliderRow(
+              title: '厚度',
+              value: settings.glassThickness,
+              min: kGlassThicknessMin,
+              max: kGlassThicknessMax,
+              divisions:
+                  ((kGlassThicknessMax - kGlassThicknessMin) /
+                          kGlassThicknessStep)
+                      .round(),
+              format: (value) => value.round().toString(),
+              onChanged: app.setGlassThickness,
+            ),
+            _HairLine(),
+            _SliderRow(
+              title: '模糊',
+              value: settings.glassBlur,
+              min: kGlassBlurMin,
+              max: kGlassBlurMax,
+              divisions:
+                  ((kGlassBlurMax - kGlassBlurMin) / kGlassBlurStep).round(),
+              format: (value) => value.round().toString(),
+              onChanged: app.setGlassBlur,
+            ),
+            _HairLine(),
+            _SliderRow(
+              title: '色散',
+              value: settings.glassDispersion,
+              min: kGlassDispersionMin,
+              max: kGlassDispersionMax,
+              divisions:
+                  ((kGlassDispersionMax - kGlassDispersionMin) /
+                          kGlassDispersionStep)
+                      .round(),
+              format: (value) => value.toStringAsFixed(2),
+              onChanged: app.setGlassDispersion,
+            ),
+          ],
+        ),
+
+        // ─────────── 控制台布局 ───────────
+        _SectionCard(
+          title: '控制台布局',
+          icon: Icons.height_rounded,
+          children: <Widget>[
+            Text(
+              '调整底部面板的尺寸，改完立即生效',
+              style: TextStyle(color: palette.textMuted, fontSize: 11),
+            ),
+            const SizedBox(height: 10),
+            _SliderRow(
+              title: '提示框高度',
+              value: settings.suggestionPanelHeight,
+              min: kSuggestionPanelHeightMin,
+              max: kSuggestionPanelHeightMax,
+              // 档位步进等于单个候选项的高度：每档露出的候选条数都是整数
+              divisions:
+                  ((kSuggestionPanelHeightMax - kSuggestionPanelHeightMin) /
+                          kSuggestionPanelHeightStep)
+                      .round(),
+              format: (value) => '${value.round()} px',
+              onChanged: app.setSuggestionPanelHeight,
+            ),
+            _HairLine(),
+            _SliderRow(
+              title: '输入框最大高度',
+              value: settings.inputMaxLines.toDouble(),
+              min: kInputMaxLinesMin.toDouble(),
+              max: kInputMaxLinesMax.toDouble(),
+              divisions: kInputMaxLinesMax - kInputMaxLinesMin,
+              // 行是整数，读数里带上单位，免得跟上面的像素值混起来
+              format: (value) => '${value.round()} 行',
+              onChanged: (value) => app.setInputMaxLines(value.round()),
             ),
           ],
         ),
@@ -382,7 +485,7 @@ class _BrightnessSelector extends StatelessWidget {
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
         color: palette.textMuted.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(context.radius(12)),
       ),
       child: Row(
         children: <Widget>[
@@ -417,19 +520,20 @@ class _Segment extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final radius = context.radius(10);
     return Semantics(
       selected: selected,
       button: true,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(radius),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOutCubic,
           padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
             color: selected ? palette.accentHighlight : Colors.transparent,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(radius),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -585,13 +689,14 @@ class _QualityOption extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final radius = context.radius(10);
 
     return Semantics(
       selected: selected,
       button: true,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(radius),
         child: AnimatedContainer(
           duration: _duration,
           curve: Curves.easeOutCubic,
@@ -599,7 +704,7 @@ class _QualityOption extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
             color: selected ? palette.accentHighlight : Colors.transparent,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(radius),
           ),
           child: Row(
             children: <Widget>[
@@ -715,7 +820,7 @@ class _ActionRow extends StatelessWidget {
 
     return InkWell(
       onTap: enabled ? onTap : null,
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(context.radius(10)),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
         child: Row(
@@ -754,19 +859,38 @@ class _ActionRow extends StatelessWidget {
   }
 }
 
-/// 一行滑块：标题 + 百分比读数 + 轨道。
+/// 一行滑块：标题 + 读数 + 轨道。
+///
+/// 默认按 0..1 显示成百分比（模糊 / 压暗这类强度滑块）；像素、行数这类
+/// 有单位的量用 [min] / [max] 重新标定量程，并用 [format] 给读数。
 class _SliderRow extends StatelessWidget {
   const _SliderRow({
     required this.title,
     required this.value,
     required this.onChanged,
     this.enabled = true,
+    this.min = 0,
+    this.max = 1,
+    this.divisions,
+    this.format,
   });
 
   final String title;
   final double value;
   final ValueChanged<double> onChanged;
   final bool enabled;
+
+  /// 量程下限（默认 0）
+  final double min;
+
+  /// 量程上限（默认 1）
+  final double max;
+
+  /// 档位数；null 表示连续可拖
+  final int? divisions;
+
+  /// 读数格式化；不给就按百分比显示
+  final String Function(double value)? format;
 
   @override
   Widget build(BuildContext context) {
@@ -788,7 +912,7 @@ class _SliderRow extends StatelessWidget {
             ),
             const Spacer(),
             Text(
-              '${(value * 100).round()}%',
+              format?.call(value) ?? '${(value * 100).round()}%',
               style: TextStyle(
                 color: enabled ? palette.accent : palette.textMuted,
                 fontSize: 12,
@@ -807,7 +931,13 @@ class _SliderRow extends StatelessWidget {
             thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
             overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
           ),
-          child: Slider(value: value, onChanged: enabled ? onChanged : null),
+          child: Slider(
+            value: value,
+            min: min,
+            max: max,
+            divisions: divisions,
+            onChanged: enabled ? onChanged : null,
+          ),
         ),
       ],
     );

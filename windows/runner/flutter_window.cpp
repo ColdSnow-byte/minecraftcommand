@@ -27,6 +27,31 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
+  // "minecraftcommand/window" (see lib/main.dart). The Dart side owns the
+  // light/dark decision, because it also honours the in-app setting, which the
+  // OS registry cannot know about; the runner just applies it to the frame.
+  window_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(),
+          "minecraftcommand/window",
+          &flutter::StandardMethodCodec::GetInstance());
+  window_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        if (call.method_name() == "setDarkTitleBar") {
+          const bool* dark = std::get_if<bool>(call.arguments());
+          if (dark == nullptr) {
+            result->Error("bad_arguments", "setDarkTitleBar expects a bool");
+            return;
+          }
+          Win32Window::SetTitleBarDark(GetHandle(), *dark);
+          result->Success();
+          return;
+        }
+        result->NotImplemented();
+      });
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -40,6 +65,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  // Drop the channel before the engine it talks to.
+  window_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

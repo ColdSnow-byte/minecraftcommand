@@ -47,6 +47,8 @@ class QualityPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    // 全局圆角系数统一在这里生效：调用点只管写设计好的基准值
+    final r = context.radius(radius);
 
     Widget surface = context.glassEnabled
         ? GlassContainer(
@@ -54,14 +56,14 @@ class QualityPanel extends StatelessWidget {
             // premium 需要一块自己的几何图层，漏了会直接断言失败
             useOwnLayer: true,
             padding: padding,
-            shape: LiquidRoundedSuperellipse(borderRadius: radius),
+            shape: LiquidRoundedSuperellipse(borderRadius: r),
             child: child,
           )
         : Container(
             padding: padding,
             decoration: BoxDecoration(
               color: palette.solidSurface,
-              borderRadius: BorderRadius.circular(radius),
+              borderRadius: BorderRadius.circular(r),
             ),
             child: child,
           );
@@ -69,7 +71,7 @@ class QualityPanel extends StatelessWidget {
     // 光球包在玻璃之上、外边距之内：
     // 放在外边距外面的话，光球会绕着一块比面板大的矩形跑。
     if (showOrbit) {
-      surface = OrbitGlow(radius: radius, child: surface);
+      surface = OrbitGlow(radius: r, child: surface);
     }
 
     if (margin != null) {

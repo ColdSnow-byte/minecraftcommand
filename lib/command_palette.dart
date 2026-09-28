@@ -25,8 +25,10 @@ Future<String?> showCommandPalette(
     backgroundColor: palette.isDark
         ? const Color(0xE6101014)
         : const Color(0xF2F6F7FA),
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(
+        top: Radius.circular(context.radius(24)),
+      ),
     ),
     builder: (sheetContext) => SafeArea(
       child: Column(
@@ -148,7 +150,7 @@ class _Pill extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: color,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(context.radius(6)),
       ),
       child: Text(
         label,

@@ -66,8 +66,8 @@ AccentOption accentById(String id) =>
 /// 页面里所有颜色都从这里取（`context.palette.xxx`），因此换主题色、
 /// 切明暗模式时全界面自动跟着变——不需要各自去监听设置。
 ///
-/// 明暗两套色阶是分别调过的：深色下用"白灰混色"保证在近黑底上的可读性，
-/// 浅色下换成同明度关系的冷灰，避免直接反色导致的脏感。
+/// 明暗两套色阶是分别调过的，但**对比度阶梯是一致的**：每一档在各自底色
+/// （深色近黑 / 浅色近白）上都取差不多的对比度（约 17 : 12 : 8 : 6）。
 class AppPalette {
   const AppPalette({required this.accent, required this.isDark});
 
@@ -103,15 +103,20 @@ class AppPalette {
 
   // ─────────────────────────── 文本色阶 ───────────────────────────
 
-  /// 主文本 → 次要 → 辅助 → 弱提示
+  /// 主文本 → 次要（副文本）→ 辅助 → 弱提示
+  ///
+  /// 浅色组的取值必须以 [background]（近白）为底来配：原来那套是把深色组
+  /// 的明度关系直接搬过来的，于是浅色下这几档全都偏浅——尤其 [textMuted]
+  /// 的浅色值（#98A2AE）和深色值（#8B949F）明度几乎相同，切到浅色时副文本
+  /// 看上去"根本没切过来"，白底上也发虚。现在按深色组同样的对比度阶梯重配。
   Color get textPrimary =>
       isDark ? const Color(0xFFF2F5F8) : const Color(0xFF15181D);
   Color get textSecondary =>
-      isDark ? const Color(0xFFC8D0D9) : const Color(0xFF474F5C);
+      isDark ? const Color(0xFFC8D0D9) : const Color(0xFF2A2F36);
   Color get textTertiary =>
-      isDark ? const Color(0xFFA3ADB8) : const Color(0xFF6B7683);
+      isDark ? const Color(0xFFA3ADB8) : const Color(0xFF40474F);
   Color get textMuted =>
-      isDark ? const Color(0xFF8B949F) : const Color(0xFF98A2AE);
+      isDark ? const Color(0xFF8B949F) : const Color(0xFF545C66);
 
   // ─────────────────────────── 背景 ───────────────────────────
 

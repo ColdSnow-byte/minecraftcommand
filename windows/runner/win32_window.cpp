@@ -3,6 +3,8 @@
 #include <dwmapi.h>
 #include <flutter_windows.h>
 
+#include <optional>
+
 #include "resource.h"
 
 namespace {
@@ -28,6 +30,20 @@ constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme"
 
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
+
+// Title bar brightness explicitly requested by the Flutter side, if any.
+//
+// std::optional distinguishes "the app has not decided yet" from "the app chose
+// light mode": while it is empty we keep following the system preference, once
+// it is set the app's choice wins for the rest of the session.
+static std::optional<bool> g_title_bar_dark_override;
+
+// Applies the dark/light decoration flag to the title bar and borders.
+void ApplyTitleBarTheme(HWND const window, bool dark) {
+  BOOL enable_dark_mode = dark ? TRUE : FALSE;
+  DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &enable_dark_mode, sizeof(enable_dark_mode));
+}
 
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 
@@ -272,7 +288,19 @@ void Win32Window::OnDestroy() {
   // No-op; provided for subclasses.
 }
 
+void Win32Window::SetTitleBarDark(HWND const window, bool dark) {
+  g_title_bar_dark_override = dark;
+  ApplyTitleBarTheme(window, dark);
+}
+
 void Win32Window::UpdateTheme(HWND const window) {
+  // The app already made an explicit choice: it wins over the system
+  // preference, including on theme-change broadcasts.
+  if (g_title_bar_dark_override.has_value()) {
+    ApplyTitleBarTheme(window, *g_title_bar_dark_override);
+    return;
+  }
+
   DWORD light_mode;
   DWORD light_mode_size = sizeof(light_mode);
   LSTATUS result = RegGetValue(HKEY_CURRENT_USER, kGetPreferredBrightnessRegKey,
@@ -281,8 +309,6 @@ void Win32Window::UpdateTheme(HWND const window) {
                                &light_mode_size);
 
   if (result == ERROR_SUCCESS) {
-    BOOL enable_dark_mode = light_mode == 0;
-    DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                          &enable_dark_mode, sizeof(enable_dark_mode));
+    ApplyTitleBarTheme(window, light_mode == 0);
   }
 }

@@ -55,6 +55,12 @@ class Win32Window {
   // Return a RECT representing the bounds of the current client area.
   RECT GetClientArea();
 
+  // Forces the window frame (title bar and borders) into dark or light mode,
+  // overriding the system preference for the rest of the session. Used by the
+  // Flutter side so the native frame matches the in-app light/dark choice
+  // instead of disagreeing with it when the OS preference differs.
+  static void SetTitleBarDark(HWND const window, bool dark);
+
  protected:
   // Processes and route salient window messages for mouse handling,
   // size change and DPI. Delegates handling of these to member overloads that

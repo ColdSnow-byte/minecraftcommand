@@ -11,6 +11,7 @@ class HistoryRecord {
     required this.command,
     required this.success,
     required this.message,
+    this.createdAt,
   });
 
   /// 运行时自增序号，作为列表 Key 让入场动画只在插入时播一次。
@@ -20,6 +21,36 @@ class HistoryRecord {
   final String command;
   final bool success;
   final String message;
+
+  /// 执行时间（本地时区）。
+  ///
+  /// 可空：加上这一项之前存下来的记录没有时间，与其编一个"刚刚"骗人，
+  /// 不如让卡片干脆不显示时间。
+  final DateTime? createdAt;
+}
+
+/// 把执行时间格式化成历史卡片右上角那一行。
+///
+/// 只给「日期 + 时钟」，不做"3 分钟前"这种相对时间：相对读数需要一个定时器
+/// 不停刷新，否则会停在旧值上（"刚刚"挂一小时）；绝对时间永远是对的。
+///
+/// [now] 显式传入是为了可测——调用处给 `DateTime.now()`。
+String formatHistoryTime(DateTime time, DateTime now) {
+  final local = time.toLocal();
+  final clock =
+      '${local.hour.toString().padLeft(2, '0')}:'
+      '${local.minute.toString().padLeft(2, '0')}';
+
+  // 用 UTC 的"当天零点"相减：本地零点在有夏令时的时区里差值不是整数天
+  final today = DateTime.utc(now.year, now.month, now.day);
+  final thatDay = DateTime.utc(local.year, local.month, local.day);
+  final daysAgo = today.difference(thatDay).inDays;
+
+  // <= 0：今天（时钟回拨等造成的"未来"也按今天显示，别显示成 0 天前）
+  if (daysAgo <= 0) return clock;
+  if (daysAgo == 1) return '昨天 $clock';
+  if (local.year == now.year) return '${local.month}/${local.day} $clock';
+  return '${local.year}/${local.month}/${local.day} $clock';
 }
 
 /// 历史记录的唯一真源。
@@ -78,6 +109,7 @@ class HistoryController extends ChangeNotifier {
         command: command,
         success: success,
         message: message,
+        createdAt: DateTime.now(),
       ),
     );
     if (_items.length > maxItems) {
@@ -137,6 +169,8 @@ class HistoryStore {
     'c': r.command,
     'ok': r.success,
     'm': r.message,
+    // 存绝对时间戳（与时区无关），读回时再转成当地时间
+    't': r.createdAt?.millisecondsSinceEpoch,
   });
 
   /// 解析失败返回 null，由调用方跳过——单条坏数据不该让整段历史消失。
@@ -152,6 +186,10 @@ class HistoryStore {
         command: command,
         success: json['ok'] == true,
         message: message,
+        // 老存档没有 't'：留 null，卡片不显示时间，而不是假装刚刚执行过
+        createdAt: json['t'] is num
+            ? DateTime.fromMillisecondsSinceEpoch((json['t'] as num).toInt())
+            : null,
       );
     } on FormatException {
       return null;

@@ -23,6 +23,8 @@ void main() {
         backgroundImagePath: '/tmp/bg.png',
         backgroundBlur: 0.75,
         backgroundDim: 0.2,
+        suggestionPanelHeight: 160,
+        inputMaxLines: 8,
       );
 
       expect(AppSettings.fromJson(original.toJson()), original);
@@ -92,6 +94,196 @@ void main() {
       const min = AppSettings(backgroundBlur: 0, backgroundDim: 0);
       expect(min.blurSigma, 0);
       expect(min.overlayOpacity, 0);
+    });
+  });
+
+  group('控制台尺寸', () {
+    test('默认值落在可选范围内，且正好是某一档', () {
+      const settings = AppSettings();
+
+      expect(
+        settings.suggestionPanelHeight,
+        inInclusiveRange(kSuggestionPanelHeightMin, kSuggestionPanelHeightMax),
+      );
+      // 落在两档之间的话，滑块会停在档位缝隙里，读数与档位对不上
+      expect(
+        (settings.suggestionPanelHeight - kSuggestionPanelHeightMin) %
+            kSuggestionPanelHeightStep,
+        0,
+      );
+      expect(
+        settings.inputMaxLines,
+        inInclusiveRange(kInputMaxLinesMin, kInputMaxLinesMax),
+      );
+    });
+
+    test('能序列化往返', () {
+      const original = AppSettings(
+        suggestionPanelHeight: 160,
+        inputMaxLines: 9,
+      );
+      final restored = AppSettings.fromJson(original.toJson());
+
+      expect(restored.suggestionPanelHeight, 160);
+      expect(restored.inputMaxLines, 9);
+    });
+
+    test('旧存档没有这两个字段时回落到默认值', () {
+      final restored = AppSettings.fromJson(<String, dynamic>{
+        'accent': 'violet',
+      });
+
+      expect(
+        restored.suggestionPanelHeight,
+        AppSettings().suggestionPanelHeight,
+      );
+      expect(restored.inputMaxLines, AppSettings().inputMaxLines);
+    });
+
+    test('越界的值被夹回可选范围', () {
+      // 存档被手改过：值离谱也不能把底部面板撑爆、或让输入框消失
+      final restored = AppSettings.fromJson(<String, dynamic>{
+        'suggestH': 99999,
+        'inputLines': -3,
+      });
+
+      expect(restored.suggestionPanelHeight, kSuggestionPanelHeightMax);
+      expect(restored.inputMaxLines, kInputMaxLinesMin);
+    });
+
+    test('类型损坏时只丢那一项', () {
+      final restored = AppSettings.fromJson(<String, dynamic>{
+        'suggestH': '好高',
+        'inputLines': <int>[3],
+        'accent': 'violet',
+      });
+
+      expect(
+        restored.suggestionPanelHeight,
+        AppSettings().suggestionPanelHeight,
+      );
+      expect(restored.inputMaxLines, AppSettings().inputMaxLines);
+      expect(restored.accentId, 'violet');
+    });
+
+    test('控制器写入时也会夹取', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final controller = AppSettingsController(const AppSettings());
+
+      controller.setSuggestionPanelHeight(1e6);
+      controller.setInputMaxLines(999);
+
+      expect(
+        controller.settings.suggestionPanelHeight,
+        kSuggestionPanelHeightMax,
+      );
+      expect(controller.settings.inputMaxLines, kInputMaxLinesMax);
+
+      await _flushDisk();
+      controller.dispose();
+    });
+  });
+
+  group('圆角与玻璃质感', () {
+    test('默认值都落在滑块量程上', () {
+      const settings = AppSettings();
+
+      // 默认值必须正好压在某一档上，否则滑块会停在两个档位之间
+      expect(
+        (settings.radiusScale - kRadiusScaleMin) / kRadiusScaleStep,
+        closeTo(10, 1e-9),
+      );
+      expect(
+        (settings.glassThickness - kGlassThicknessMin) / kGlassThicknessStep,
+        closeTo(4, 1e-9),
+      );
+      expect(
+        (settings.glassBlur - kGlassBlurMin) / kGlassBlurStep,
+        closeTo(5, 1e-9),
+      );
+      expect(
+        (settings.glassDispersion - kGlassDispersionMin) /
+            kGlassDispersionStep,
+        closeTo(1, 1e-9),
+      );
+    });
+
+    test('能序列化往返', () {
+      const original = AppSettings(
+        radiusScale: 0.8,
+        glassThickness: 45,
+        glassBlur: 14,
+        glassDispersion: 0.06,
+      );
+      final restored = AppSettings.fromJson(original.toJson());
+
+      expect(restored, original);
+    });
+
+    test('越界的值被夹回可选范围', () {
+      final restored = AppSettings.fromJson(<String, dynamic>{
+        'radius': 9,
+        'gThickness': -10,
+        'gBlur': 999,
+        'gDispersion': -1,
+      });
+
+      expect(restored.radiusScale, kRadiusScaleMax);
+      expect(restored.glassThickness, kGlassThicknessMin);
+      expect(restored.glassBlur, kGlassBlurMax);
+      expect(restored.glassDispersion, kGlassDispersionMin);
+    });
+
+    test('类型损坏时只丢那一项', () {
+      final restored = AppSettings.fromJson(<String, dynamic>{
+        'radius': '圆一点',
+        'gThickness': <int>[20],
+        'accent': 'violet',
+      });
+
+      expect(restored.radiusScale, AppSettings().radiusScale);
+      expect(restored.glassThickness, AppSettings().glassThickness);
+      expect(restored.accentId, 'violet');
+    });
+
+    test('映射到库里的玻璃参数，未暴露的字段保持"跟随默认"', () {
+      const settings = AppSettings(
+        glassThickness: 40,
+        glassBlur: 12,
+        glassDispersion: 0.05,
+      );
+      final glass = settings.glassSettings;
+
+      expect(glass.thickness, 40);
+      expect(glass.blur, 12);
+      expect(glass.chromaticAberration, 0.05);
+      // 没在设置里暴露的字段必须是 null：null 才会落到各组件自己的默认值，
+      // 写成具体值会把染色、高光角度这些一起改掉
+      expect(glass.glassColor, isNull);
+      expect(glass.refractiveIndex, isNull);
+      expect(glass.lightAngle, isNull);
+    });
+
+    testWidgets('context.radius 按系数缩放基准半径', (WidgetTester tester) async {
+      final controller = AppSettingsController(
+        const AppSettings(radiusScale: 1.5),
+      );
+      late double scaled;
+
+      await tester.pumpWidget(
+        AppSettingsScope(
+          controller: controller,
+          child: Builder(
+            builder: (context) {
+              scaled = context.radius(20);
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      expect(scaled, 30);
+      controller.dispose();
     });
   });
 
@@ -318,6 +510,65 @@ void main() {
 
       expect(controller.items.length, 1);
       expect(controller.items.single.command, '/good');
+    });
+  });
+
+  group('历史记录时间', () {
+    setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+    final now = DateTime(2026, 9, 28, 15, 30);
+
+    test('今天只给时钟', () {
+      expect(formatHistoryTime(DateTime(2026, 9, 28, 9, 5), now), '09:05');
+    });
+
+    test('昨天带"昨天"', () {
+      expect(formatHistoryTime(DateTime(2026, 9, 27, 23, 59), now), '昨天 23:59');
+    });
+
+    test('今年更早带月日', () {
+      expect(formatHistoryTime(DateTime(2026, 1, 3, 8, 0), now), '1/3 08:00');
+    });
+
+    test('跨年带完整日期', () {
+      expect(
+        formatHistoryTime(DateTime(2025, 12, 31, 23, 0), now),
+        '2025/12/31 23:00',
+      );
+    });
+
+    test('时钟偏差造成的"未来"也按今天算', () {
+      // 系统时间被回拨过时，别显示成"0 天前"这种怪东西
+      expect(formatHistoryTime(DateTime(2026, 9, 28, 16, 0), now), '16:00');
+    });
+
+    test('新记录带时间，落盘读回后还在', () async {
+      final controller = HistoryController();
+      controller.add('/a', true, 'ok');
+      final added = controller.items.first.createdAt;
+      expect(added, isNotNull);
+      await _flushDisk();
+
+      final reader = HistoryController();
+      await reader.restore();
+
+      expect(
+        reader.items.first.createdAt!.millisecondsSinceEpoch,
+        added!.millisecondsSinceEpoch,
+      );
+    });
+
+    test('老存档没有时间字段时留空，不编一个', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'flutter.command_history_v1': <String>[
+          '{"c":"/old","ok":true,"m":"ok"}',
+        ],
+      });
+
+      final controller = HistoryController();
+      await controller.restore();
+
+      expect(controller.items.single.createdAt, isNull);
     });
   });
 }
